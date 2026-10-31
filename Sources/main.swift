@@ -644,8 +644,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 let c = va.localizedCaseInsensitiveCompare(vb)
                 return sortAsc ? c == .orderedAscending : c == .orderedDescending
             }
+        } else {
+            // default view: by directory path — identical order to the folder tree —
+// then natural track-number order inside the folder
+            let roots: [String] = Config.shared.libraryDirs.map { dir in
+                dir.hasPrefix("sftp://") ? (parseSftp(dir)?.path ?? dir)
+                                         : (dir as NSString).expandingTildeInPath
+            }
+            func rank(_ p: String) -> Int {
+                for (i, r) in roots.enumerated() where p == r || p.hasPrefix(r + "/") { return i }
+                return roots.count
+            }
+            filtered.sort { a, b in
+                let ra = rank(a.dirPath), rb = rank(b.dirPath)
+                if ra != rb { return ra < rb }
+                let c = a.dirPath.localizedCaseInsensitiveCompare(b.dirPath)
+                if c != .orderedSame { return c == .orderedAscending }
+                return a.title.localizedStandardCompare(b.title) == .orderedAscending
+            }
         }
         rebuildRows()
+        if rows.count > 12 {
+            var dbg: [String] = []
+            var heads: [String] = []
+            for r in rows {
+                switch r { case .header(let h): heads.append(h)
+                           case .track(let i): if dbg.count < 8 { dbg.append("  t:" + filtered[i].title) } } }
+            let dup = heads.count - Set(heads).count
+            print("order: " + dbg.joined(separator: " | ") + " || headers=\(heads.count) dup=\(dup)")
+        }
         print("filter: filtered=\(filtered.count) rows=\(rows.count)")
         table?.reloadData()
     }

@@ -22,6 +22,7 @@ final class Player: NSObject {
 
     func play(_ track: Track) {
         if let obs = timeObs { av.removeTimeObserver(obs) }
+        print("play: \(track.url.absoluteURL) remote=\(track.isRemote)")
         let item = AVPlayerItem(url: track.url)
         statusObs = item.observe(\.status, options: [.new]) { it, _ in
             DispatchQueue.main.async {

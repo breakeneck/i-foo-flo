@@ -98,12 +98,15 @@ final class LastFM {
         guard let obj = await request(method: "GET", params: signed([
             "method": "track.getInfo", "artist": track.artist, "track": track.title,
             "username": Config.shared.lastfmUser,
-        ], write: false)),
-        let info = obj.pathAny("track") as? [String: Any] else {
+        ], write: false)) else {
             // API said no such track (error 6) → remember, don't retry weekly;
             // a plain network failure is retried next pass
             print("fm getInfo fail: \(track.artist) / \(track.title) apiErr=\(lastAPIError)")
             if lastAPIError { FmCache.shared.markUnknown(artist: track.artist, title: track.title) }
+            return nil
+        }
+        guard let info = obj.pathAny("track") as? [String: Any] else {
+            FmCache.shared.markUnknown(artist: track.artist, title: track.title)
             return nil
         }
         let pc = Int(info["userplaycount"] as? String ?? "") ?? 0

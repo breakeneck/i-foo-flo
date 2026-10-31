@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var timeLabel: NSTextField!
     var playButton: NSButton!
     var loveButton: NSButton!
+    var shuffleButton: NSButton!
     var lyricsButton: NSButton!
     var sshButton: NSButton!
     var lyricsText: NSTextView!
@@ -232,6 +233,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         loveButton = NSButton(title: "♡", target: self, action: #selector(toggleLove))
         loveButton.bezelStyle = .rounded
         loveButton.toolTip = "Лайк на Last.fm"
+        shuffleButton = NSButton(title: "🔀", target: self, action: #selector(toggleShuffle))
+        shuffleButton.bezelStyle = .rounded
+        shuffleButton.toolTip = "Рандомний порядок (як Rnd у Qt-версії)"
+        updateShuffleButton()
         lyricsButton = NSButton(title: "📜", target: self, action: #selector(toggleLyrics))
         lyricsButton.bezelStyle = .rounded
         lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
@@ -252,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         nowLabel.lineBreakMode = .byTruncatingMiddle
         nowLabel.font = .systemFont(ofSize: 11)
 
-        let stack = NSStackView(views: [prev, playButton, next, loveButton, seekSlider,
+        let stack = NSStackView(views: [prev, playButton, next, shuffleButton, loveButton, seekSlider,
                                         timeLabel, volSlider, lyricsButton, sshButton])
         stack.orientation = .horizontal
         stack.spacing = 8
@@ -366,6 +371,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc func nextTrack() { playRelative(1) }
     @objc func prevTrack() { playRelative(-1) }
 
+    @objc func toggleShuffle() {
+        Config.shared.shuffle.toggle()
+        updateShuffleButton()
+    }
+    func updateShuffleButton() {
+        shuffleButton?.alphaValue = Config.shared.shuffle ? 1.0 : 0.35
+    }
+
     func playRelative(_ delta: Int) {
         guard !filtered.isEmpty else { return }
         if delta < 0, player.av.currentTime().seconds > 3 { player.seek(0); return }
@@ -396,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             try? await Task.sleep(nanoseconds: 5_000_000_000)   // let the scan settle
             await LastFM.shared.login()
             var fetched = 0
+            var fails = 0
             while seq == self.backfillSeq {
                 var didWork = false
                 for i in self.lib.tracks.indices
@@ -405,6 +419,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     didWork = true
                     if let info = await LastFM.shared.info(for: self.lib.tracks[i]) {
                         self.lib.updateStats(at: i, playcount: info.playcount, loved: info.loved)
+                        fails = 0
+                    } else {
+                        fails += 1
                     }
                     fetched += 1
                     if fetched % 15 == 0 { self.applyFilter() }
@@ -413,6 +430,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 if !didWork {
                     self.applyFilter()
                     return
+                }
+                // rate-limit / network trouble → back off instead of hammering
+                if fails >= 3 {
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    fails = 0
                 }
                 try? await Task.sleep(nanoseconds: 1_100_000_000)
             }

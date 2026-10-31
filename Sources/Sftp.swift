@@ -21,6 +21,26 @@ enum Ssh {
         catch { setStatus(host, .offline) }
     }
 
+    static func runSync(host: String, command: String) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        var data = Data()
+        try p.run()
+        let fh = pipe.fileHandleForReading
+        while true {
+            let chunk = fh.readData(ofLength: 1 << 16)
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw SshError.failed("ssh exit \(p.terminationStatus)") }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     static func run(host: String, command: String, timeout: TimeInterval = 30) async throws -> String {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {
@@ -65,6 +85,7 @@ final class StreamProxy {
         keyOptions: .strongMemory, valueOptions: .strongMemory)
     private final class StreamEntry {
         let host: String; let path: String
+        var size = 0
         init(_ h: String, _ p: String) { host = h; path = p }
     }
 
@@ -97,6 +118,10 @@ final class StreamProxy {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while true {
                 let cfd = accept(fd, nil, nil)
+                if cfd >= 0 {
+                    var nosig: Int32 = 1
+                    setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
+                }
                 if cfd < 0 { break }
                 self?.queue.async { self?.serve(cfd) }
             }
@@ -119,18 +144,40 @@ final class StreamProxy {
         let parts = first.split(separator: " ")
         guard parts.count >= 2, parts[0] == "GET", parts[1].hasPrefix("/") else { return }
         let token = String(parts[1].dropFirst().split(separator: "?").first ?? "")
+        print("proxy hit: \(token) range=\(text.lowercased().contains("range:"))")
         guard let entry = streams.object(forKey: token as NSString) else {
             writeAll(cfd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             return
         }
 
-        var remoteCmd = "cat \(sqt(entry.path))"
+        // file size once per entry (cached on the entry)
+        var size = entry.size
+        if size <= 0 {
+                    let out = try? Ssh.runSync(host: entry.host, command: "stat -c%s \(sqt(entry.path))")
+                    size = Int((out ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                    entry.size = size
+                    print("proxy stat: size=\(size) out=\(out ?? "THREW")")
+                }
+
+        // parse Range: bytes=START-[END]
+        var start = 0, end = size > 0 ? size - 1 : -1, ranged = false
         if let rline = text.components(separatedBy: "\r\n")
             .first(where: { $0.lowercased().hasPrefix("range:") }),
-           let startStr = rline.range(of: "bytes=").map({ String(rline[$0.upperBound...]) })
-            .flatMap({ $0.split(separator: "-").first }).flatMap({ Int($0) }), startStr > 0 {
-            remoteCmd = "tail -c +\(startStr + 1) \(sqt(entry.path))"
+           let spec = rline.range(of: "bytes=").map({ String(rline[$0.upperBound...]) })
+            .map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            let halves = spec.split(separator: "-", omittingEmptySubsequences: false).map { Int($0) }
+            if let sOpt = halves.first, let sVal = sOpt {
+                start = sVal
+                if halves.count > 1, let eVal = halves[1] { end = eVal }
+                ranged = true
+            }
         }
+        if size > 0 { end = min(end, size - 1) }
+        let length = (size > 0 && end >= start) ? end - start + 1 : -1
+
+        var remoteCmd = start > 0 ? "tail -c +\(start + 1) \(sqt(entry.path))"
+                                  : "cat \(sqt(entry.path))"
+        if length > 0 { remoteCmd += " | head -c \(length)" }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -140,8 +187,17 @@ final class StreamProxy {
         p.standardError = Pipe()
         do { try p.run() } catch { return }
 
-        writeAll(cfd, "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n"
-                    + "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n")
+        if ranged && size > 0 {
+            writeAll(cfd, "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\n"
+                        + "Accept-Ranges: bytes\r\nContent-Range: bytes \(start)-\(end)/\(size)\r\n"
+                        + "Content-Length: \(length)\r\nConnection: close\r\n\r\n")
+        } else if size > 0 {
+            writeAll(cfd, "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n"
+                        + "Accept-Ranges: bytes\r\nContent-Length: \(size)\r\nConnection: close\r\n\r\n")
+        } else {
+            writeAll(cfd, "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n"
+                        + "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n")
+        }
         let fh = pipe.fileHandleForReading
         while true {
             let chunk = fh.readData(ofLength: 1 << 15)

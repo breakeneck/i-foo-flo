@@ -129,9 +129,21 @@ final class Library {
                 title = String(base[base.index(after: comma)...]).trimmingCharacters(in: .whitespaces)
             } else {
                 let parts = base.components(separatedBy: " - ")
-                if parts.count >= 2 {
+                if parts.count >= 2, parts[0].allSatisfy({ $0.isNumber }), parts[0].count <= 4 {
+                    // numeric track prefix: "07 - Title" or "001 - Artist - Title"
+                    if parts.count >= 3 {
+                        artist = parts[1]
+                        title = parts.dropFirst(2).joined(separator: " - ")
+                    } else {
+                        title = parts[1]
+                    }
+                } else if parts.count >= 2 {
                     artist = parts[0]
                     title = parts.dropFirst().joined(separator: " - ")
+                }
+                // drop trailing "(1991)" year from titles
+                if let paren = title.range(of: #" \(\d{4}\)\s*$"#, options: .regularExpression) {
+                    title.removeSubrange(paren)
                 }
             }
             // generic container dirs ("Albums", "Disc 2") are not artists

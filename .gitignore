@@ -1,0 +1,4 @@
+FooBarSwift.app/
+cert/
+*.log
+.DS_Store

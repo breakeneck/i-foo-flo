@@ -1,0 +1,685 @@
+// FooBar Swift — native macOS music player.
+// AppKit + AVPlayer + MediaPlayer; SFTP via ssh + loopback HTTP proxy.
+
+import AppKit
+import AVFoundation
+import MediaPlayer
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
+                         NSTableViewDelegate, NSSearchFieldDelegate {
+    static weak var shared: AppDelegate?
+
+    let lib = Library()
+    let player = Player()
+    var filtered: [Track] = []
+    var queueIndex = -1
+
+    enum RowItem { case header(String); case track(Int) }   // Int = index in filtered
+    var rows: [RowItem] = []
+    var sortKey: String? = nil
+    var sortAsc = true
+
+    // UI
+    var window: NSWindow!
+    var table: NSTableView!
+    var search: NSSearchField!
+    var nowLabel: NSTextField!
+    var seekSlider: NSSlider!
+    var volSlider: NSSlider!
+    var timeLabel: NSTextField!
+    var playButton: NSButton!
+    var loveButton: NSButton!
+    var lyricsButton: NSButton!
+    var sshButton: NSButton!
+    var lyricsText: NSTextView!
+    var lyricsScroll: NSScrollView!
+    var lyricsSplit: NSSplitView!
+    var lyricsVisible = false
+    var scrubbing = false
+
+    // state
+    var currentLyrics: LyricsResult?
+    var lyricsReqSeq = 0
+    var lastScrobbledPath: String?
+    var playStartTime: Date?
+    var playedSeconds: TimeInterval = 0
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        AppDelegate.shared = self
+        NSApp.setActivationPolicy(.regular)
+        buildMenu()
+        buildUI()
+        wirePlayer()
+        wireMediaKeys()
+
+        lib.onUpdated = { [weak self] in self?.applyFilter(); self?.startBackfill() }
+        Ssh.onStatus = { [weak self] _ in self?.updateSshStatus() }
+        lib.scan()
+        startBackfill()
+        let lastImport = UserDefaults.standard.double(forKey: "cfg.fm_loved_imported")
+        if LastFM.shared.isEnabled,
+           Date().timeIntervalSince1970 - lastImport > 7 * 86400 {
+            Task {
+                let n = await LastFM.shared.importLoved()
+                if n > 0 { UserDefaults.standard.set(Date().timeIntervalSince1970,
+                                                     forKey: "cfg.fm_loved_imported") }
+                self.applyFilter()
+            }
+        }
+        Task {
+            for dir in Config.shared.libraryDirs {
+                if let s = parseSftp(dir) { await Ssh.probe(host: s.host) }
+            }
+        }
+
+        player.volume = Config.shared.volume
+        volSlider.doubleValue = Double(player.volume)
+        setLyricsVisible(Config.shared.lyricsEnabled)
+        updateSshStatus()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ n: Notification) {
+        Config.shared.volume = player.volume
+        scrobbleIfNeeded()
+    }
+
+    // MARK: menu
+
+    func buildMenu() {
+        let main = NSMenu()
+        let appItem = main.addItem(withTitle: "FooBar Swift", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Налаштування…", action: #selector(openSettings),
+                        keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "r")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Вийти", action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        let editItem = main.addItem(withTitle: "Правка", action: nil, keyEquivalent: "")
+        let edit = NSMenu(title: "Правка")
+        for (t, sel, k) in [("Виділити все", #selector(NSResponder.selectAll(_:)), "a"),
+                            ("Копіювати", #selector(NSText.copy(_:)), "c")] {
+            edit.addItem(withTitle: t, action: sel, keyEquivalent: k)
+        }
+        editItem.submenu = edit
+
+        let viewItem = main.addItem(withTitle: "Вигляд", action: nil, keyEquivalent: "")
+        let view = NSMenu(title: "Вигляд")
+        view.addItem(withTitle: "Тексти пісень", action: #selector(toggleLyrics), keyEquivalent: "l")
+        viewItem.submenu = view
+
+        NSApp.mainMenu = main
+    }
+
+    @objc func openSettings() { SettingsWindow.shared.show(tab: 0) }
+    @objc func rescan() { lib.scan() }
+    @objc func toggleLyrics() { setLyricsVisible(!lyricsVisible) }
+
+    func setLyricsVisible(_ visible: Bool) {
+        lyricsVisible = visible
+        lyricsScroll?.isHidden = !visible
+        Config.shared.lyricsEnabled = visible
+        if visible, let split = lyricsSplit {
+            split.setPosition(split.bounds.width * 0.62, ofDividerAt: 0)
+        }
+        if visible, currentTrack() != nil, currentLyrics == nil {
+            if let t = currentTrack() { startLyrics(for: t) }
+        }
+    }
+
+    // MARK: SSH status
+
+    func updateSshStatus() {
+        let hosts = Set(Config.shared.libraryDirs.compactMap { parseSftp($0)?.host })
+        guard !hosts.isEmpty else { sshButton.title = ""; return }
+        let states = Ssh.status
+        let offline = hosts.filter { states[$0] != .online }
+        if offline.isEmpty {
+            sshButton.title = "🟢 SSH: \(hosts.joined(separator: ","))"
+        } else {
+            sshButton.title = "🔴 SSH: \(offline.joined(separator: ",")) — реконект"
+        }
+    }
+
+    @objc func sshReconnect() {
+        sshButton.title = "🟡 SSH: під'єднання…"
+        Task {
+            for dir in Config.shared.libraryDirs {
+                if let s = parseSftp(dir) { await Ssh.probe(host: s.host) }
+            }
+            self.updateSshStatus()
+            self.lib.scan()
+        }
+    }
+
+    // MARK: UI
+
+    func buildUI() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 640),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        window.title = "FooBar Swift"
+        window.setFrameAutosaveName("MainWindow")
+        window.isRestorable = false
+        window.center()
+
+        let content = NSView(frame: window.contentView!.bounds)
+        content.autoresizingMask = [.width, .height]
+        window.contentView = content
+
+        search = NSSearchField(frame: .zero)
+        search.translatesAutoresizingMaskIntoConstraints = false
+        search.placeholderString = "Пошук…"
+        search.delegate = self
+        search.target = self
+        search.action = #selector(filterChanged)
+        content.addSubview(search)
+
+        table = NSTableView()
+        table.dataSource = self
+        table.delegate = self
+        table.usesAlternatingRowBackgroundColors = true
+        table.doubleAction = #selector(rowDoubleClicked)
+        let cols: [(String, String, CGFloat)] = [
+            ("love", "♥", 30), ("title", "Назва", 280), ("artist", "Артист", 150),
+            ("album", "Альбом", 150), ("dur", "Час", 55), ("plays", "▶", 40),
+        ]
+        for (id, name, w) in cols {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = name; c.width = w
+            table.addTableColumn(c)
+        }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "")
+        menu.addItem(withTitle: "Перепід'єднати SSH", action: #selector(sshReconnect), keyEquivalent: "")
+        menu.addItem(withTitle: "Налаштування…", action: #selector(openSettings), keyEquivalent: "")
+        for it in menu.items { it.target = self }
+        table.menu = menu
+
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+
+        lyricsText = NSTextView()
+        lyricsText.isEditable = false
+        lyricsText.font = .systemFont(ofSize: 14)
+        lyricsText.textContainerInset = NSSize(width: 12, height: 12)
+        let lscroll = NSScrollView()
+        lscroll.documentView = lyricsText
+        lscroll.hasVerticalScroller = true
+
+        lyricsSplit = NSSplitView()
+        lyricsSplit.isVertical = true
+        lyricsSplit.dividerStyle = .thin
+        lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(lyricsSplit)
+        lyricsSplit.addArrangedSubview(scroll)
+        lyricsSplit.addArrangedSubview(lscroll)
+        lyricsScroll = lscroll
+
+        // transport
+        playButton = NSButton(title: "▶", target: self, action: #selector(togglePlay))
+        playButton.bezelStyle = .rounded
+        let prev = NSButton(title: "⏮", target: self, action: #selector(prevTrack))
+        prev.bezelStyle = .rounded
+        let next = NSButton(title: "⏭", target: self, action: #selector(nextTrack))
+        next.bezelStyle = .rounded
+        loveButton = NSButton(title: "♡", target: self, action: #selector(toggleLove))
+        loveButton.bezelStyle = .rounded
+        loveButton.toolTip = "Лайк на Last.fm"
+        lyricsButton = NSButton(title: "📜", target: self, action: #selector(toggleLyrics))
+        lyricsButton.bezelStyle = .rounded
+        lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
+        sshButton = NSButton(title: "", target: self, action: #selector(sshReconnect))
+        sshButton.isBordered = false
+        sshButton.font = .systemFont(ofSize: 11)
+        sshButton.toolTip = "Статус SSH-з'єднання; клік = перепід'єднання"
+
+        seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: self, action: #selector(seeked))
+        seekSlider.isContinuous = true
+        timeLabel = NSTextField(labelWithString: "0:00 / 0:00")
+        timeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        volSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: self, action: #selector(volChanged))
+        volSlider.isContinuous = true
+        volSlider.controlSize = .small
+
+        nowLabel = NSTextField(labelWithString: "—")
+        nowLabel.lineBreakMode = .byTruncatingMiddle
+        nowLabel.font = .systemFont(ofSize: 11)
+
+        let stack = NSStackView(views: [prev, playButton, next, loveButton, seekSlider,
+                                        timeLabel, volSlider, lyricsButton, sshButton])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+
+        let nowStack = NSStackView(views: [NSTextField(labelWithString: "Грає:"), nowLabel])
+        nowStack.orientation = .horizontal
+        nowStack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(nowStack)
+
+        NSLayoutConstraint.activate([
+            search.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            search.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            search.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            lyricsSplit.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8),
+            lyricsSplit.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            lyricsSplit.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            lyricsSplit.bottomAnchor.constraint(equalTo: nowStack.topAnchor, constant: -8),
+            nowStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            nowStack.bottomAnchor.constraint(equalTo: stack.topAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            stack.heightAnchor.constraint(equalToConstant: 28),
+            volSlider.widthAnchor.constraint(equalToConstant: 90),
+            timeLabel.widthAnchor.constraint(equalToConstant: 100),
+        ])
+
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+            guard let self, ev.window == self.window else { return ev }
+            if ev.keyCode == 36, let fi = self.filteredIndex(forRow: self.table.selectedRow) {
+                self.playRow(fi); return nil
+            }
+            if ev.keyCode == 49 { self.togglePlay(); return nil }
+            return ev
+        }
+    }
+
+    // MARK: playback
+
+    func wirePlayer() {
+        player.onTime = { [weak self] cur, dur in
+            guard let self else { return }
+            if !self.scrubbing, dur > 0 { self.seekSlider.doubleValue = cur / dur }
+            self.timeLabel.stringValue = "\(fmt(cur)) / \(fmt(dur))"
+            self.lyricsTick(cur)
+            self.playedSeconds += 0.5
+            if let t = self.currentTrack(), t.duration > 0,
+               self.playedSeconds >= t.duration * 0.5 {
+                self.scrobbleIfNeeded()
+            }
+        }
+        player.onItemEnd = { [weak self] in
+            self?.scrobbleIfNeeded()
+            self?.nextTrack()
+        }
+    }
+
+    func currentTrack() -> Track? {
+        queueIndex >= 0 && queueIndex < filtered.count ? filtered[queueIndex] : nil
+    }
+
+    func trackKey(_ t: Track) -> String { t.remotePath ?? t.url.path }
+
+    func playRow(_ row: Int) {
+        guard row >= 0, row < filtered.count else { return }
+        scrobbleIfNeeded()
+        queueIndex = row
+        var t = filtered[row]
+        if t.isRemote, let rp = t.remotePath, let host = remoteHost(for: rp) {
+            t.url = StreamProxy.shared.url(for: host, path: rp)
+            filtered[row] = t
+        }
+        player.play(t)
+        playStartTime = Date()
+        playedSeconds = 0
+        playButton.title = "⏸"
+        updateNowPlaying(t)
+        startLyrics(for: t)
+        refreshLastFM(for: t, row: row)
+    }
+
+    private func remoteHost(for path: String) -> String? {
+        for dir in Config.shared.libraryDirs {
+            if let s = parseSftp(dir), path.hasPrefix(s.path) { return s.host }
+        }
+        return nil
+    }
+
+    @objc func rowDoubleClicked() {
+        if let fi = filteredIndex(forRow: table.clickedRow) { playRow(fi) }
+    }
+
+    @objc func togglePlay() {
+        if player.av.currentItem == nil {
+            playRow(filteredIndex(forRow: table.selectedRow) ?? 0); return
+        }
+        player.toggle()
+        playButton.title = player.isPlaying ? "⏸" : "▶"
+        if !player.isPlaying { scrobbleIfNeeded() }
+        if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+            info[MPNowPlayingInfoPropertyPlaybackRate] = player.isPlaying ? 1.0 : 0.0
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
+    }
+
+    @objc func nextTrack() { playRelative(1) }
+    @objc func prevTrack() { playRelative(-1) }
+
+    func playRelative(_ delta: Int) {
+        guard !filtered.isEmpty else { return }
+        if delta < 0, player.av.currentTime().seconds > 3 { player.seek(0); return }
+        if Config.shared.shuffle && delta > 0 {
+            queueIndex = Int.random(in: 0..<filtered.count)
+        } else {
+            queueIndex = min(max(queueIndex + delta, 0), filtered.count - 1)
+        }
+        playRow(queueIndex)
+    }
+
+    @objc func seeked() {
+        let dur = CMTimeGetSeconds(player.av.currentItem?.duration ?? .zero)
+        if dur.isFinite, dur > 0 { player.seek(seekSlider.doubleValue * dur) }
+    }
+
+    @objc func volChanged() { player.volume = Float(volSlider.doubleValue) }
+
+    // MARK: last.fm
+
+    // background: fill playcount/loved for the whole library, 1 track per ~1.1s,
+    // results live in the SQLite cache so this runs once a week per track
+    func startBackfill() {
+        backfillSeq += 1
+        let seq = backfillSeq
+        guard LastFM.shared.isEnabled else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)   // let the scan settle
+            await LastFM.shared.login()
+            var fetched = 0
+            while seq == self.backfillSeq {
+                var didWork = false
+                for i in self.lib.tracks.indices
+                where !self.lib.tracks[i].artist.isEmpty
+                    && FmCache.shared.needsLookup(artist: self.lib.tracks[i].artist,
+                                                  title: self.lib.tracks[i].title) {
+                    didWork = true
+                    if let info = await LastFM.shared.info(for: self.lib.tracks[i]) {
+                        self.lib.updateStats(at: i, playcount: info.playcount, loved: info.loved)
+                    }
+                    fetched += 1
+                    if fetched % 15 == 0 { self.applyFilter() }
+                    break
+                }
+                if !didWork {
+                    self.applyFilter()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 1_100_000_000)
+            }
+        }
+    }
+    private var backfillSeq = 0
+
+    func scrobbleIfNeeded() {
+        guard let t = currentTrack(), let start = playStartTime,
+              t.duration > 0, playedSeconds >= min(t.duration * 0.5, 240),
+              lastScrobbledPath != trackKey(t) else { return }
+        lastScrobbledPath = trackKey(t)
+        FmCache.shared.set(artist: t.artist, title: t.title, playcount: nil, loved: nil)
+        if let c = FmCache.shared.get(artist: t.artist, title: t.title) {
+            FmCache.shared.set(artist: t.artist, title: t.title,
+                               playcount: (c.playcount ?? 0) + 1, loved: nil)
+        }
+        LastFM.shared.scrobble(artist: t.artist, title: t.title, album: t.album, start: start)
+    }
+
+    func refreshLastFM(for t: Track, row: Int) {
+        loveButton.title = t.loved == true ? "♥" : "♡"
+        loveButton.isEnabled = LastFM.shared.isEnabled && !t.artist.isEmpty
+        guard LastFM.shared.isEnabled, !t.artist.isEmpty else { return }
+        Task {
+            if let info = await LastFM.shared.info(for: t) {
+                for i in self.filtered.indices
+                where self.filtered[i].url == t.url && self.filtered[i].remotePath == t.remotePath {
+                    self.filtered[i].playcount = info.playcount
+                    self.filtered[i].loved = info.loved
+                }
+                self.loveButton.title = info.loved ? "♥" : "♡"
+                self.table.reloadData()
+            }
+        }
+    }
+
+    @objc func toggleLove() {
+        guard let t = currentTrack(), queueIndex >= 0 else { return }
+        let target = !(t.loved ?? false)
+        LastFM.shared.setLoved(t, loved: target) { [weak self] ok in
+            guard ok, let self else { return }
+            self.filtered[self.queueIndex].loved = target
+            self.loveButton.title = target ? "♥" : "♡"
+            self.table.reloadData()
+        }
+    }
+
+    // MARK: lyrics
+
+    func startLyrics(for t: Track) {
+        lyricsReqSeq += 1
+        let seq = lyricsReqSeq
+        currentLyrics = nil
+        lyricsText.string = Config.shared.lyricsEnabled ? "…" : ""
+        guard Config.shared.lyricsEnabled, !t.artist.isEmpty else { return }
+        Task {
+            let r = await Lyrics.fetch(artist: t.artist, title: t.title,
+                                       album: t.album, duration: t.duration)
+            guard seq == lyricsReqSeq else { return }
+            currentLyrics = r
+            renderLyrics(r)
+        }
+    }
+
+    func renderLyrics(_ r: LyricsResult?) {
+        guard let r else {
+            lyricsText.string = "— нічого не знайшов —"
+            return
+        }
+        let src = "\n\n— \(r.source) —"
+        if !r.synced.isEmpty {
+            lyricsText.string = r.synced.map(\.text).joined(separator: "\n") + src
+        } else {
+            lyricsText.string = (r.plain ?? "") + src
+        }
+    }
+
+    func lyricsTick(_ cur: TimeInterval) {
+        guard let r = currentLyrics, !r.synced.isEmpty, lyricsVisible else { return }
+        let idx = r.synced.lastIndex { $0.time <= cur } ?? 0
+        let lines = lyricsText.string.components(separatedBy: "\n")
+        guard idx < lines.count, let lm = lyricsText.layoutManager else { return }
+        var pos = 0
+        for i in 0..<idx { pos += lines[i].count + 1 }
+        let ns = lyricsText.string as NSString
+        var start = pos
+        while start > 0 && ns.character(at: start - 1) != 10 { start -= 1 }
+        var end = pos
+        while end < ns.length && ns.character(at: end) != 10 { end += 1 }
+        let para = NSRange(location: start, length: end - start)
+        lyricsText.layoutManager?.setTemporaryAttributes([
+            NSAttributedString.Key.foregroundColor: NSColor.labelColor,
+            NSAttributedString.Key.font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+        ], forCharacterRange: para)
+        lyricsText.scrollRangeToVisible(para)
+    }
+
+    // MARK: media keys
+
+    func wireMediaKeys() {
+        let cc = MPRemoteCommandCenter.shared()
+        cc.playCommand.addTarget { _ in Task { @MainActor in self.player.av.play() }; return .success }
+        cc.pauseCommand.addTarget { _ in Task { @MainActor in self.player.av.pause() }; return .success }
+        cc.togglePlayPauseCommand.addTarget { _ in Task { @MainActor in self.togglePlay() }; return .success }
+        cc.nextTrackCommand.addTarget { _ in Task { @MainActor in self.nextTrack() }; return .success }
+        cc.previousTrackCommand.addTarget { _ in Task { @MainActor in self.prevTrack() }; return .success }
+    }
+
+    func updateNowPlaying(_ t: Track) {
+        nowLabel.stringValue = "\(t.artist.isEmpty ? "" : t.artist + " — ")\(t.title)"
+        window.title = "\(t.title) — FooBar Swift"
+        var info: [String: Any] = [
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+        ]
+        if t.duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = t.duration }
+        if !t.title.isEmpty { info[MPMediaItemPropertyTitle] = t.title }
+        if !t.artist.isEmpty { info[MPMediaItemPropertyArtist] = t.artist }
+        if !t.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = t.album }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        if LastFM.shared.isEnabled, !t.artist.isEmpty {
+            LastFM.shared.updateNowPlaying(artist: t.artist, title: t.title)
+        }
+    }
+
+    // MARK: table
+
+    @objc func filterChanged() { applyFilter() }
+
+    func applyFilter() {
+        let q = search.stringValue.lowercased()
+        filtered = q.isEmpty ? lib.tracks : lib.tracks.filter {
+            $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q)
+                || $0.album.lowercased().contains(q)
+        }
+        if let key = sortKey {
+            filtered.sort { a, b in
+                let va: String, vb: String
+                switch key {
+                case "artist": va = a.artist; vb = b.artist
+                case "album":  va = a.album;  vb = b.album
+                case "plays":  va = String(format: "%09d", a.playcount ?? -1)
+                              vb = String(format: "%09d", b.playcount ?? -1)
+                case "love":   va = a.loved == true ? "1" : "0"
+                              vb = b.loved == true ? "1" : "0"
+                default:       va = a.title;  vb = b.title
+                }
+                let c = va.localizedCaseInsensitiveCompare(vb)
+                return sortAsc ? c == .orderedAscending : c == .orderedDescending
+            }
+        }
+        rebuildRows()
+        print("filter: filtered=\(filtered.count) rows=\(rows.count)")
+        table?.reloadData()
+    }
+
+    func rebuildRows() {
+        rows = []
+        if sortKey == nil {
+            var lastFolder: String?
+            for (i, t) in filtered.enumerated() {
+                if t.folder != lastFolder {
+                    rows.append(.header(t.folder))
+                    lastFolder = t.folder
+                }
+                rows.append(.track(i))
+            }
+        } else {
+            rows = filtered.indices.map { .track($0) }
+        }
+    }
+
+    func track(forRow row: Int) -> Track? {
+        guard row >= 0, row < rows.count, case .track(let i) = rows[row] else { return nil }
+        return filtered[i]
+    }
+
+    func filteredIndex(forRow row: Int) -> Int? {
+        guard row >= 0, row < rows.count, case .track(let i) = rows[row] else { return nil }
+        return i
+    }
+
+    func numberOfRows(in tv: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tv: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .header = rows[row] { return true }
+        return false
+    }
+
+    func tableView(_ tv: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        guard case .header(let folder) = rows[row] else { return nil }
+        let rv = NSTableRowView()
+        let label = NSTextField(labelWithString: folder)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        rv.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: rv.leadingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: rv.centerYAnchor),
+        ])
+        return rv
+    }
+
+    func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .header = rows[row] { return 24 }
+        return 20
+    }
+
+    func tableView(_ tv: NSTableView, didClick col: NSTableColumn) {
+        if sortKey == col.identifier.rawValue {
+            if sortAsc { sortAsc = false }
+            else { sortKey = nil; sortAsc = true }   // third click: back to folders
+        } else {
+            sortKey = col.identifier.rawValue
+            sortAsc = true
+        }
+        for c in tv.tableColumns {
+            c.sortDescriptorPrototype = NSSortDescriptor(key: c.identifier.rawValue,
+                                                         ascending: sortAsc)
+        }
+        applyFilter()
+    }
+
+    func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
+        guard let fi = filteredIndex(forRow: row), let id = col?.identifier.rawValue else { return nil }
+        // hydrate last.fm state from the local cache without a network hit
+        if filtered[fi].loved == nil, LastFM.shared.isEnabled, !filtered[fi].artist.isEmpty,
+           let c = FmCache.shared.get(artist: filtered[fi].artist, title: filtered[fi].title) {
+            filtered[fi].playcount = c.playcount
+            filtered[fi].loved = c.loved
+        }
+        let t = filtered[fi]
+        let text: String
+        switch id {
+        case "love": text = t.loved == true ? "♥" : ""
+        case "title": text = t.title
+        case "artist": text = t.artist
+        case "album": text = t.album
+        case "dur": text = t.duration > 0 ? fmt(t.duration) : ""
+        case "plays": text = (t.playcount ?? 0) > 0 ? String(t.playcount!) : ""
+        default: text = ""
+        }
+        let cellId = NSUserInterfaceItemIdentifier("cell")
+        let tf = (tv.makeView(withIdentifier: cellId, owner: self) as? NSTextField) ?? {
+            let f = NSTextField(labelWithString: "")
+            f.identifier = cellId
+            f.lineBreakMode = .byTruncatingTail
+            f.font = .systemFont(ofSize: 12)
+            return f
+        }()
+        tf.stringValue = text
+        return tf
+    }
+}
+
+func fmt(_ s: TimeInterval) -> String {
+    guard s.isFinite, s >= 0 else { return "0:00" }
+    return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+}
+
+setbuf(stdout, nil)
+let app = NSApplication.shared
+MainActor.assumeIsolated {
+    let delegate = AppDelegate()   // strong ref: NSApp.delegate is weak
+    app.delegate = delegate
+    app.run()
+}

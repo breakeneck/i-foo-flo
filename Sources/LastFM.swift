@@ -3,6 +3,19 @@
 
 import Foundation
 
+// strip '01. ' / '07 - ' track-number prefixes and trailing '(1999)' year —
+// Last.fm and lyrics sites don't index those
+func cleanQueryTitle(_ s: String) -> String {
+    var t = s
+    if let r = t.range(of: "^\\s*\\d{1,3}\\s*[.\\-_]\\s*", options: .regularExpression) {
+        t.removeSubrange(r)
+    }
+    if let r = t.range(of: "\\s*\\((?:19|20)\\d{2}\\)\\s*$", options: .regularExpression) {
+        t.removeSubrange(r)
+    }
+    return t.trimmingCharacters(in: .whitespaces)
+}
+
 @MainActor
 final class LastFM {
     static let shared = LastFM()
@@ -56,7 +69,7 @@ final class LastFM {
         Task {
             await login()
             _ = await request(method: "POST", params: signed(
-                ["method": "track.updateNowPlaying", "artist": artist, "track": title],
+                ["method": "track.updateNowPlaying", "artist": artist, "track": cleanQueryTitle(title)],
                 write: true))
         }
     }
@@ -66,7 +79,7 @@ final class LastFM {
         Task {
             await login()
             _ = await request(method: "POST", params: signed([
-                "method": "track.scrobble", "artist": artist, "track": title,
+                "method": "track.scrobble", "artist": artist, "track": cleanQueryTitle(title),
                 "album": album, "timestamp": String(Int(start.timeIntervalSince1970)),
             ], write: true))
         }
@@ -78,7 +91,7 @@ final class LastFM {
             await login()
             let ok = await request(method: "POST", params: signed([
                 "method": loved ? "track.love" : "track.unlove",
-                "artist": track.artist, "track": track.title,
+                "artist": track.artist, "track": cleanQueryTitle(track.title),
             ], write: true)) != nil
             if ok { FmCache.shared.set(artist: track.artist, title: track.title,
                                        playcount: nil, loved: loved) }
@@ -96,7 +109,7 @@ final class LastFM {
         await login()
         lastAPIError = false
         guard let obj = await request(method: "GET", params: signed([
-            "method": "track.getInfo", "artist": track.artist, "track": track.title,
+            "method": "track.getInfo", "artist": track.artist, "track": cleanQueryTitle(track.title),
             "username": Config.shared.lastfmUser,
         ], write: false)) else {
             // API said no such track (error 6) → remember, don't retry weekly;
@@ -157,9 +170,11 @@ final class LastFM {
             req.httpBody = Data()
         }
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
+              resp is HTTPURLResponse,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
+        // Last.fm sends API errors (e.g. 6 "Track not found") with HTTP 404 —
+        // still a valid answer, not a network failure
         if obj["error"] != nil {
             lastAPIError = true
             print("fm api error \(obj["error"] ?? "?"): \(obj["message"] ?? "") [\(params["method"] ?? "")]")

@@ -285,10 +285,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsButton = NSButton(title: "📜", target: self, action: #selector(toggleLyrics))
         lyricsButton.bezelStyle = .rounded
         lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
-        sshButton = NSButton(title: "", target: self, action: #selector(sshReconnect))
-        sshButton.isBordered = false
-        sshButton.font = .systemFont(ofSize: 11)
-        sshButton.toolTip = "Статус SSH-з'єднання; клік = перепід'єднання"
 
         seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: self, action: #selector(seeked))
         seekSlider.isContinuous = true
@@ -303,13 +299,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         nowLabel.font = .systemFont(ofSize: 11)
 
         let stack = NSStackView(views: [prev, playButton, next, shuffleButton, loveButton, seekSlider,
-                                        timeLabel, volSlider, lyricsButton, sshButton])
+                                        timeLabel, volSlider, lyricsButton])
         stack.orientation = .horizontal
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
+        sshButton = NSButton(title: "⚠️ SSH", target: self, action: #selector(sshReconnect))
+        sshButton.translatesAutoresizingMaskIntoConstraints = false
+        sshButton.bezelStyle = .inline
+        sshButton.font = .systemFont(ofSize: 11)
+        sshButton.toolTip = "SSH-з'єднання з сервером (клік = реконект)"
         let nowStack = NSStackView(views: [NSTextField(labelWithString: "Грає:"), nowLabel])
+        content.addSubview(sshButton)
         nowStack.orientation = .horizontal
         nowStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(nowStack)
@@ -324,6 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             lyricsSplit.bottomAnchor.constraint(equalTo: nowStack.topAnchor, constant: -8),
             nowStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             nowStack.bottomAnchor.constraint(equalTo: stack.topAnchor, constant: -8),
+            sshButton.centerYAnchor.constraint(equalTo: nowStack.centerYAnchor),
+            sshButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            nowStack.trailingAnchor.constraint(lessThanOrEqualTo: sshButton.leadingAnchor, constant: -8),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
@@ -537,12 +542,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let seq = lyricsReqSeq
         currentLyrics = nil
         lyricsText.string = Config.shared.lyricsEnabled ? "…" : ""
-        guard Config.shared.lyricsEnabled, !t.artist.isEmpty else { return }
+        guard !t.artist.isEmpty else { return }
+        let dur = player.duration > 0 ? player.duration : t.duration
         Task {
-            let r = await Lyrics.fetch(artist: t.artist, title: t.title,
-                                       album: t.album, duration: t.duration)
+            let r = await Lyrics.fetch(artist: t.artist, title: cleanQueryTitle(t.title),
+                                       album: t.album, duration: dur)
             guard seq == lyricsReqSeq else { return }
             currentLyrics = r
+            print("lyrics: \(r?.source ?? "not found") for [\(t.artist)] / [\(t.title)]")
             renderLyrics(r)
         }
     }

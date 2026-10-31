@@ -46,6 +46,7 @@ enum Lyrics {
             return r
         }
         if let r = await lrclibSearch(artist: artist, title: title) { return r }
+        if let r = await lyricsOvO(artist: artist, title: title) { return r }
         if let r = await genius(artist: artist, title: title) { return r }
         return nil
     }
@@ -69,7 +70,9 @@ enum Lyrics {
             .init(name: "artist_name", value: artist),
             .init(name: "track_name", value: title),
         ]
-        guard let data = try? await URLSession.shared.data(from: comps.url!).0,
+        var req = URLRequest(url: comps.url!)
+        req.setValue("FooBarSwift/1.0 (music player)", forHTTPHeaderField: "User-Agent")
+        guard let data = try? await URLSession.shared.data(for: req).0,
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
               let first = arr.first(where: { ($0["syncedLyrics"] as? String)?.isEmpty == false })
                 ?? arr.first else { return nil }
@@ -84,6 +87,16 @@ enum Lyrics {
         return LyricsResult(synced: synced, plain: plainStr, source: source)
     }
 
+    // token-free plain-text fallback (Deezer-backed store)
+    private static func lyricsOvO(artist: String, title: String) async -> LyricsResult? {
+        let a = artist.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? artist
+        let t = title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? title
+        guard let obj = await get(URL(string: "https://api.lyrics.ovh/v1/\(a)/\(t)")),
+              let text = obj["lyrics"] as? String else { return nil }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : LyricsResult(synced: [], plain: clean, source: "lyrics.ovh")
+    }
+
     private static func genius(artist: String, title: String) async -> LyricsResult? {
         let token = Config.shared.geniusToken
         guard !token.isEmpty else { return nil }
@@ -92,7 +105,7 @@ enum Lyrics {
         guard let url = comps.url else { return nil }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         guard let (data, _) = try? await URLSession.shared.data(for: req),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let hits = obj.path("response", "hits") as? [[String: Any]],
@@ -114,7 +127,9 @@ enum Lyrics {
 
     private static func get(_ url: URL?) async -> [String: Any]? {
         guard let url else { return nil }
-        guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("FooBarSwift/1.0 (music player)", forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }

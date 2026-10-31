@@ -48,6 +48,11 @@ final class Player: NSObject {
 
     var isPlaying: Bool { av.timeControlStatus == .playing }
 
+    var duration: TimeInterval {
+        let d = av.currentItem?.asset.duration ?? .zero
+        return d.isIndefinite || d.seconds < 0 ? 0 : d.seconds
+    }
+
     func seek(_ sec: TimeInterval) {
         av.seek(to: CMTime(seconds: sec, preferredTimescale: 600))
     }

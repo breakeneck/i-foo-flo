@@ -42,6 +42,6 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </plist>
 EOF
 
-codesign --force --sign 343359880AA59E3959979FF5119A4D934E9A9E0C "$APP" 2>/dev/null \
+codesign --force --sign 7B228DEF19A88C43B09524F85DA99C9AB55E16EC "$APP" 2>/dev/null \
   || codesign --force --sign - "$APP" 2>/dev/null || true
 echo "built: $(pwd)/$APP"

@@ -5,6 +5,24 @@ import AppKit
 import AVFoundation
 import MediaPlayer
 
+final class FolderNode {
+    let name: String
+    let path: String
+    private(set) var children: [FolderNode] = []
+    private var index: [String: FolderNode] = [:]
+    init(name: String, path: String) { self.name = name; self.path = path }
+    func child(_ n: String, _ p: String) -> FolderNode {
+        if let c = index[n] { return c }
+        let c = FolderNode(name: n, path: p)
+        index[n] = c
+        children.append(c)
+        return c
+    }
+    var sortedChildren: [FolderNode] {
+        children.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                          NSTableViewDelegate, NSSearchFieldDelegate {
@@ -36,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsText: NSTextView!
     var lyricsScroll: NSScrollView!
     var lyricsSplit: NSSplitView!
+    var outline: NSOutlineView!
+    var treeRoots: [FolderNode] = []
+    var folderFilter: String?    // dir path set by tree click; nil = all
+    var currentPlayingPath: String?
     var lyricsVisible = false
     var scrubbing = false
 
@@ -54,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         wirePlayer()
         wireMediaKeys()
 
-        lib.onUpdated = { [weak self] in self?.applyFilter(); self?.startBackfill() }
+        lib.onUpdated = { [weak self] in self?.applyFilter(); self?.startBackfill(); self?.buildTree() }
         Ssh.onStatus = { [weak self] _ in self?.updateSshStatus() }
         lib.scan()
         startBackfill()
@@ -77,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         player.volume = Config.shared.volume
         volSlider.doubleValue = Double(player.volume)
         setLyricsVisible(Config.shared.lyricsEnabled)
+        DispatchQueue.main.async { self.lyricsSplit.setPosition(230, ofDividerAt: 0) }
         updateSshStatus()
     }
 
@@ -126,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsScroll?.isHidden = !visible
         Config.shared.lyricsEnabled = visible
         if visible, let split = lyricsSplit {
-            split.setPosition(split.bounds.width * 0.62, ofDividerAt: 0)
+            split.setPosition(split.bounds.width * 0.62, ofDividerAt: 1)
         }
         if visible, currentTrack() != nil, currentLyrics == nil {
             if let t = currentTrack() { startLyrics(for: t) }
@@ -214,14 +237,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lscroll.documentView = lyricsText
         lscroll.hasVerticalScroller = true
 
+        lyricsScroll = lscroll
+
+        // folder tree (left pane), like the Qt treeView
+        outline = NSOutlineView()
+        let tcol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        tcol.title = "Бібліотека"
+        tcol.width = 220
+        outline.addTableColumn(tcol)
+        outline.outlineTableColumn = tcol
+        outline.dataSource = self
+        outline.delegate = self
+        outline.headerView = nil
+        outline.rowSizeStyle = .small
+        let treeMenu = NSMenu()
+        treeMenu.addItem(withTitle: "Показати всі треки", action: #selector(clearFolderFilter), keyEquivalent: "")
+        treeMenu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "")
+        for it in treeMenu.items { it.target = self }
+        outline.menu = treeMenu
+        let treeScroll = NSScrollView()
+        treeScroll.documentView = outline
+        treeScroll.hasVerticalScroller = true
+
         lyricsSplit = NSSplitView()
         lyricsSplit.isVertical = true
         lyricsSplit.dividerStyle = .thin
         lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(lyricsSplit)
+        lyricsSplit.addArrangedSubview(treeScroll)
         lyricsSplit.addArrangedSubview(scroll)
         lyricsSplit.addArrangedSubview(lscroll)
-        lyricsScroll = lscroll
+        content.addSubview(lyricsSplit)
 
         // transport
         playButton = NSButton(title: "▶", target: self, action: #selector(togglePlay))
@@ -336,6 +381,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             filtered[row] = t
         }
         player.play(t)
+        currentPlayingPath = t.dirPath
+        locateCurrentFolder()
         playStartTime = Date()
         playedSeconds = 0
         playButton.title = "⏸"
@@ -568,9 +615,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func applyFilter() {
         let q = search.stringValue.lowercased()
-        filtered = q.isEmpty ? lib.tracks : lib.tracks.filter {
-            $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q)
-                || $0.album.lowercased().contains(q)
+        let ff = folderFilter
+        filtered = lib.tracks.filter { t in
+            if let ff = ff, t.dirPath != ff && !t.dirPath.hasPrefix(ff + "/") { return false }
+            if q.isEmpty { return true }
+            return t.title.lowercased().contains(q) || t.artist.lowercased().contains(q)
+                || t.album.lowercased().contains(q)
         }
         if let key = sortKey {
             filtered.sort { a, b in
@@ -696,6 +746,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 func fmt(_ s: TimeInterval) -> String {
     guard s.isFinite, s >= 0 else { return "0:00" }
     return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+}
+
+// MARK: folder tree
+@MainActor
+extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
+
+    func buildTree() {
+        guard outline != nil else { return }
+        var roots: [FolderNode] = []
+        var rootNodeByDir: [String: FolderNode] = [:]
+        var rootPathByDir: [String: String] = [:]
+        for dir in Config.shared.libraryDirs {
+            let isRemote = dir.hasPrefix("sftp://")
+            let rootPath = isRemote ? (parseSftp(dir)?.path ?? dir)
+                                    : (dir as NSString).expandingTildeInPath
+            let label = (isRemote ? "🌐 " : "📁 ") + (rootPath as NSString).lastPathComponent
+            let node = FolderNode(name: label, path: rootPath)
+            rootNodeByDir[dir] = node
+            rootPathByDir[dir] = rootPath
+            roots.append(node)
+        }
+        for t in lib.tracks {
+            for (dir, node) in rootNodeByDir {
+                let rootPath = rootPathByDir[dir]!
+                guard t.dirPath.hasPrefix(rootPath + "/") else { continue }
+                let rel = String(t.dirPath.dropFirst(rootPath.count + 1))
+                var cur = node
+                var acc = rootPath
+                for comp in rel.split(separator: "/") {
+                    acc += "/" + comp
+                    cur = cur.child(String(comp), acc)
+                }
+                break
+            }
+        }
+        treeRoots = roots
+        outline.reloadData()
+        for r in roots { outline.expandItem(r) }
+    }
+
+    func outlineView(_ ov: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let n = item as? FolderNode else { return treeRoots.count }
+        return n.sortedChildren.count
+    }
+    func outlineView(_ ov: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if let n = item as? FolderNode { return n.sortedChildren[index] }
+        return treeRoots[index]
+    }
+    func outlineView(_ ov: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        guard let n = item as? FolderNode else { return true }
+        return !n.children.isEmpty
+    }
+    func outlineView(_ ov: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        guard let n = item as? FolderNode else { return nil }
+        let id = NSUserInterfaceItemIdentifier("tnode")
+        let tf = (ov.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
+            let t = NSTextField(labelWithString: "")
+            t.identifier = id
+            t.font = .systemFont(ofSize: 12)
+            t.lineBreakMode = .byTruncatingMiddle
+            return t
+        }()
+        tf.stringValue = n.name
+        return tf
+    }
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard outline != nil, outline.selectedRow >= 0,
+              let node = outline.item(atRow: outline.selectedRow) as? FolderNode else { return }
+        folderFilter = node.path
+        applyFilter()
+    }
+
+    @objc func clearFolderFilter() {
+        folderFilter = nil
+        outline?.deselectAll(nil)
+        applyFilter()
+    }
+
+    /// expand + select the tree node of the currently playing track
+    func locateCurrentFolder() {
+        guard let path = currentPlayingPath else { return }
+        var chain: [FolderNode] = []
+        func walk(_ node: FolderNode, _ acc: [FolderNode]) -> Bool {
+            let here = acc + [node]
+            if node.path == path { chain = here; return true }
+            for c in node.children where walk(c, here) { return true }
+            return false
+        }
+        for r in treeRoots where walk(r, []) { break }
+        guard !chain.isEmpty else { return }
+        for n in chain.dropLast() { outline.expandItem(n) }
+        if let last = chain.last {
+            let row = outline.row(forItem: last)
+            if row >= 0 {
+                outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                outline.scrollRowToVisible(row)
+            }
+        }
+    }
 }
 
 setbuf(stdout, nil)

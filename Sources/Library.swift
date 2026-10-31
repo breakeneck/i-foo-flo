@@ -15,6 +15,12 @@ struct Track {
     var loved: Bool?        // last.fm love state, filled lazily
 
     var isRemote: Bool { remotePath != nil }
+
+    /// directory containing the track — used by the folder tree
+    var dirPath: String {
+        if let rp = remotePath { return (rp as NSString).deletingLastPathComponent }
+        return url.deletingLastPathComponent().path
+    }
 }
 
 enum AudioExt {
@@ -96,8 +102,8 @@ final class Library {
                 }
             }
             if let d = try? await asset.load(.duration), d.isNumeric { dur = CMTimeGetSeconds(d) }
-                        let folder = !album.isEmpty ? album
-                            : url.deletingLastPathComponent().lastPathComponent
+                        let folder = !album.isEmpty ? cleanName(album)
+                            : cleanName(url.deletingLastPathComponent().lastPathComponent)
                         outTracks.append(Track(url: url, title: title, artist: artist, album: album,
                                                duration: dur, remotePath: nil, folder: folder,
                                                playcount: nil, loved: nil))
@@ -118,10 +124,15 @@ final class Library {
         var outTracks: [Track] = []
         for line in out.split(separator: "\n") {
             let path = String(line)
-            let comps = path.split(separator: "/").map(String.init)
-            let file = comps.last ?? path
-            let parent = comps.count >= 2 ? comps[comps.count - 2] : ""
-            // server convention: "<Artist>,<Title>.mp3"; fallback "Artist - Title"
+            // hierarchy relative to the library root decides artist/album:
+            // root/<Artist>/<file>            → parent = artist
+            // root/<Artist>/<Album>/<file>    → grandparent = artist, parent = album
+            // root/<Collection>/<Artist>/<Album>/<file> works too
+            let rel = path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : path
+            let segs = rel.split(separator: "/").map(String.init)
+            let file = segs.last ?? path
+            let parent = segs.count >= 2 ? segs[segs.count - 2] : ""
+            let grandparent = segs.count >= 3 ? segs[segs.count - 3] : ""
             let base = (file as NSString).deletingPathExtension
             var artist = "", title = base
             if let comma = base.firstIndex(of: ",") {
@@ -141,22 +152,37 @@ final class Library {
                     artist = parts[0]
                     title = parts.dropFirst().joined(separator: " - ")
                 }
-                // drop trailing "(1991)" year from titles
-                if let paren = title.range(of: #" \(\d{4}\)\s*$"#, options: .regularExpression) {
-                    title.removeSubrange(paren)
-                }
             }
-            // generic container dirs ("Albums", "Disc 2") are not artists
+            title = cleanName(title)
+            // path-derived fallbacks: grandparent wins as artist when it exists
             let generic = parent.range(of: #"^(albums?|disc\s*\d*|cd\s*\d*|bonus.*)$"#,
                                        options: [.regularExpression, .caseInsensitive]) != nil
-            if artist.isEmpty && !generic { artist = parent }
+            if artist.isEmpty {
+                if !grandparent.isEmpty { artist = grandparent }
+                else if !generic { artist = parent }
+            }
+            // parent dir is an album when there is a deeper artist level
+            var album = ""
+            if !grandparent.isEmpty && !generic { album = cleanName(parent) }
+            let folder = !album.isEmpty ? album : cleanName(parent)
             outTracks.append(Track(url: URL(string: "about:blank")!, title: title,
-                                   artist: artist, album: "", duration: 0,
-                                   remotePath: path, folder: parent,
+                                   artist: artist, album: album, duration: 0,
+                                   remotePath: path, folder: folder,
                                    playcount: nil, loved: nil))
+        }
+        for t in outTracks.prefix(3) {
+            print("parsed: artist=[\(t.artist)] title=[\(t.title)] album=[\(t.album)] folder=[\(t.folder)]")
         }
         return outTracks
     }
+}
+
+/// strip "01 - " track prefixes and trailing "(2000)" years from display names
+func cleanName(_ s: String) -> String {
+    var t = s
+    if let r = t.range(of: #"^\d{1,4}\s*-\s*"#, options: .regularExpression) { t.removeSubrange(r) }
+    if let r = t.range(of: #"\s*\(\d{4}\)\s*$"#, options: .regularExpression) { t.removeSubrange(r) }
+    return t.trimmingCharacters(in: .whitespaces)
 }
 
 func sqt(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }

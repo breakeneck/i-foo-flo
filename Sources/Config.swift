@@ -60,6 +60,36 @@ final class Config {
         get { d.string(forKey: "cfg.stop_after_mode") ?? "off" }
         set { d.set(newValue, forKey: "cfg.stop_after_mode") }
     }
+
+    // MARK: session state (restored on next launch)
+    var sortKey: String? {
+        get { d.string(forKey: "cfg.sort_key") }
+        set { d.set(newValue, forKey: "cfg.sort_key") }
+    }
+    var sortAsc: Bool {
+        get { d.object(forKey: "cfg.sort_asc") as? Bool ?? true }
+        set { d.set(newValue, forKey: "cfg.sort_asc") }
+    }
+    var splitPos0: Double {
+        get { d.object(forKey: "cfg.split0") as? Double ?? 0 }
+        set { d.set(newValue, forKey: "cfg.split0") }
+    }
+    var splitPos1: Double {
+        get { d.object(forKey: "cfg.split1") as? Double ?? 0 }
+        set { d.set(newValue, forKey: "cfg.split1") }
+    }
+    var searchText: String {
+        get { d.string(forKey: "cfg.search_text") ?? "" }
+        set { d.set(newValue, forKey: "cfg.search_text") }
+    }
+    var lastTrackKey: String {
+        get { d.string(forKey: "cfg.last_track") ?? "" }
+        set { d.set(newValue, forKey: "cfg.last_track") }
+    }
+    var lastTrackPos: Double {
+        get { d.object(forKey: "cfg.last_pos") as? Double ?? 0 }
+        set { d.set(newValue, forKey: "cfg.last_pos") }
+    }
 }
 
 // MARK: - MD5 helper (Last.fm api_sig)

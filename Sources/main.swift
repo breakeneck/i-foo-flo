@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         wirePlayer()
         wireMediaKeys()
 
-        lib.onUpdated = { [weak self] in self?.lib.hydrateStatsFromCache(); self?.applyFilter(); self?.startBackfill(); self?.buildTree() }
+        lib.onUpdated = { [weak self] in self?.lib.hydrateStatsFromCache(); self?.applyFilter(); self?.restoreSession(); self?.startBackfill(); self?.buildTree() }
         Ssh.onStatus = { [weak self] _ in self?.updateSshStatus() }
         lib.scan()
         startBackfill()
@@ -100,8 +100,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         player.volume = Config.shared.volume
         volSlider.doubleValue = Double(player.volume)
+        sortKey = Config.shared.sortKey
+        sortAsc = Config.shared.sortAsc
+        if !Config.shared.searchText.isEmpty { search.stringValue = Config.shared.searchText }
+        orderPopup.selectItem(at: Config.shared.shuffle ? 1 : 0)
         setLyricsVisible(Config.shared.lyricsEnabled)
-        DispatchQueue.main.async { self.lyricsSplit.setPosition(230, ofDividerAt: 0) }
+        DispatchQueue.main.async {
+            let p0 = Config.shared.splitPos0
+            if p0 > 0 { self.lyricsSplit.setPosition(p0, ofDividerAt: 0) }
+            let p1 = Config.shared.splitPos1
+            if p1 > 0, self.lyricsVisible { self.lyricsSplit.setPosition(p1, ofDividerAt: 1) }
+        }
         updateSshStatus()
     }
 
@@ -109,6 +118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func applicationWillTerminate(_ n: Notification) {
         Config.shared.volume = player.volume
+        Config.shared.searchText = search.stringValue
+        if lyricsSplit != nil {
+            Config.shared.splitPos0 = dividerPos(lyricsSplit, 0)
+            if lyricsVisible {
+                Config.shared.splitPos1 = dividerPos(lyricsSplit, 1)
+            }
+        }
         scrobbleIfNeeded()
     }
 
@@ -152,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         Config.shared.lyricsEnabled = visible
         if visible, let split = lyricsSplit {
             split.setPosition(split.bounds.width * 0.62, ofDividerAt: 1)
+            Config.shared.splitPos1 = dividerPos(split, 1)
         }
         if visible, currentTrack() != nil, currentLyrics == nil {
             if let t = currentTrack() { startLyrics(for: t) }
@@ -242,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         scroll.autohidesScrollers = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsColumnResizing = true
+        table.autosaveName = "PlaylistColumns"   // widths + order survive restarts
 
         lyricsText = NSTextView()
         lyricsText.isEditable = false
@@ -480,6 +498,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         locateCurrentFolder()
         playStartTime = Date()
         playedSeconds = 0
+        Config.shared.lastTrackKey = trackKey(t)
+        Config.shared.lastTrackPos = 0
         playButton.title = "⏸"
         updateNowPlaying(t)
         startLyrics(for: t)
@@ -521,6 +541,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         Config.shared.stopAfterMode = ["off", "once", "always"][stopPopup.indexOfSelectedItem]
     }
 
+    // MARK: session restore
+    private var sessionRestored = false
+
+    func dividerPos(_ split: NSSplitView, _ i: Int) -> Double {
+        guard split.subviews.count > i + 1 else { return 0 }
+        return Double(split.subviews[i + 1].frame.minX)
+    }
+
+    func restoreSession() {
+        guard !sessionRestored else { return }
+        sessionRestored = true
+        let key = Config.shared.lastTrackKey
+        guard !key.isEmpty, let fi = filtered.firstIndex(where: { trackKey($0) == key }) else { return }
+        queueIndex = fi
+        if let r = rows.firstIndex(where: { if case .track(let i) = $0 { return i == fi }; return false }) {
+            table.selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false)
+        }
+        let pos = Config.shared.lastTrackPos
+        let dur = filtered[fi].duration
+        if pos > 0, dur > 0 {
+            seekSlider.doubleValue = pos / dur
+            timeLabel.stringValue = "\(fmt(pos)) / \(fmt(dur))"
+        }
+    }
+
     func playRelative(_ delta: Int) {
         guard !filtered.isEmpty else { return }
         if delta < 0, player.av.currentTime().seconds > 3 { player.seek(0); return }
@@ -534,7 +579,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func seeked() {
         let dur = CMTimeGetSeconds(player.av.currentItem?.duration ?? .zero)
-        if dur.isFinite, dur > 0 { player.seek(seekSlider.doubleValue * dur) }
+        if dur.isFinite, dur > 0 {
+            player.seek(seekSlider.doubleValue * dur)
+            Config.shared.lastTrackPos = seekSlider.doubleValue * dur
+        }
     }
 
     @objc func volChanged() { player.volume = Float(volSlider.doubleValue) }
@@ -1002,6 +1050,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             sortKey = col.identifier.rawValue
             sortAsc = true
         }
+        Config.shared.sortKey = sortKey
+        Config.shared.sortAsc = sortAsc
         for c in tv.tableColumns {
             c.sortDescriptorPrototype = NSSortDescriptor(key: c.identifier.rawValue,
                                                          ascending: sortAsc)

@@ -230,6 +230,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        table.columnAutoresizingStyle = .noColumnAutoresizing
+        table.allowsColumnResizing = true
 
         lyricsText = NSTextView()
         lyricsText.isEditable = false

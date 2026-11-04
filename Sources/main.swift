@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         wirePlayer()
         wireMediaKeys()
 
-        lib.onUpdated = { [weak self] in self?.applyFilter(); self?.startBackfill(); self?.buildTree() }
+        lib.onUpdated = { [weak self] in self?.lib.hydrateStatsFromCache(); self?.applyFilter(); self?.startBackfill(); self?.buildTree() }
         Ssh.onStatus = { [weak self] _ in self?.updateSshStatus() }
         lib.scan()
         startBackfill()
@@ -405,6 +405,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             if !self.scrubbing, dur > 0 { self.seekSlider.doubleValue = cur / dur }
             self.timeLabel.stringValue = "\(fmt(cur)) / \(fmt(dur))"
             self.lyricsTick(cur)
+            // remote tracks often lack TLEN in tags — adopt the real duration
+            // from the stream so scrobble thresholds work
+            if self.queueIndex >= 0 && self.queueIndex < self.filtered.count,
+               self.filtered[self.queueIndex].duration <= 0, dur > 0 {
+                self.filtered[self.queueIndex].duration = dur
+            }
             self.playedSeconds += 0.5
             if let t = self.currentTrack(), t.duration > 0,
                self.playedSeconds >= t.duration * 0.5 {
@@ -564,11 +570,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
               t.duration > 0, playedSeconds >= min(t.duration * 0.5, 240),
               lastScrobbledPath != trackKey(t) else { return }
         lastScrobbledPath = trackKey(t)
-        FmCache.shared.set(artist: t.artist, title: t.title, playcount: nil, loved: nil)
-        if let c = FmCache.shared.get(artist: t.artist, title: t.title) {
-            FmCache.shared.set(artist: t.artist, title: t.title,
-                               playcount: (c.playcount ?? 0) + 1, loved: nil)
+        // local +1 immediately (server value catches up on next relookup) AND
+        // reflect it in the visible table right away
+        let newPc = (FmCache.shared.peek(artist: t.artist, title: t.title) ?? 0) + 1
+        FmCache.shared.set(artist: t.artist, title: t.title, playcount: newPc, loved: nil)
+        for i in lib.tracks.indices where trackKey(lib.tracks[i]) == trackKey(t) {
+            lib.updateStats(at: i, playcount: newPc, loved: lib.tracks[i].loved)
         }
+        for i in filtered.indices where trackKey(filtered[i]) == trackKey(t) {
+            filtered[i].playcount = newPc
+        }
+        table?.reloadData()
         LastFM.shared.scrobble(artist: t.artist, title: t.title, album: t.album, start: start)
     }
 

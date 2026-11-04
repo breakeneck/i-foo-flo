@@ -94,6 +94,36 @@ final class FmCache {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
+    /// raw playcount ignoring cache age (for local +1 bookkeeping)
+    func peek(artist: String, title: String) -> Int? {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT playcount FROM track_stats WHERE artist=? AND title=?",
+                                 -1, &stmt, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(stmt, 1, artist, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 2, title, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
+        let v = Int(sqlite3_column_int(stmt, 0))
+        return v >= 0 ? v : nil
+    }
+
+    /// one-pass dump of every known playcount/loved (table hydration)
+    func all() -> [(artist: String, title: String, playcount: Int, loved: Bool)] {
+        var out: [(String, String, Int, Bool)] = []
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db,
+            "SELECT artist,title,playcount,loved FROM track_stats WHERE playcount >= 0",
+            -1, &stmt, nil) == SQLITE_OK else { return out }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(stmt, 0)),
+                        String(cString: sqlite3_column_text(stmt, 1)),
+                        Int(sqlite3_column_int(stmt, 2)),
+                        sqlite3_column_int(stmt, 3) == 1))
+        }
+        return out
+    }
+
     func set(artist: String, title: String, playcount: Int?, loved: Bool?) {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }

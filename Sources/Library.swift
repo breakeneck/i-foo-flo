@@ -56,6 +56,19 @@ final class Library {
         tracks[i].loved = loved
     }
 
+    // fill playcount/loved for the whole table from the SQLite cache in one
+    // pass, so numbers show instantly instead of waiting for the slow backfill
+    func hydrateStatsFromCache() {
+        var map: [String: (Int, Bool)] = [:]
+        for r in FmCache.shared.all() { map[r.artist + "\u{1}" + r.title] = (r.playcount, r.loved) }
+        guard !map.isEmpty else { return }
+        for i in tracks.indices {
+            guard let s = map[tracks[i].artist + "\u{1}" + tracks[i].title] else { continue }
+            if tracks[i].playcount == nil { tracks[i].playcount = s.0 }
+            if tracks[i].loved == nil { tracks[i].loved = s.1 }
+        }
+    }
+
     func scan() {
         scanSeq += 1
         let seq = scanSeq

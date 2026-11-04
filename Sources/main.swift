@@ -448,6 +448,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             guard let self, ev.window == self.window else { return ev }
+            // Qt-parity global-to-window shortcuts: these win over focused
+            // text fields (window-wide QShortcuts behave the same in Qt)
+            let ctrl = ev.modifierFlags.contains(.control)
+            switch ev.keyCode {
+            case 53: // Escape: clear search if it holds text, else minimize (Qt behavior)
+                if !self.search.stringValue.isEmpty {
+                    self.search.stringValue = ""
+                    self.filterChanged()
+                    return nil
+                }
+                self.window.miniaturize(nil); return nil
+            case 99: // F3 = focus search
+                self.window.makeFirstResponder(self.search)
+                self.search.selectText(nil); return nil
+            case 125 where ctrl: self.nextTrack(); return nil   // Ctrl+Down
+            case 126 where ctrl: self.prevTrack(); return nil   // Ctrl+Up
+            case 1 where ctrl:   // Ctrl+S = toggle stop-after-current
+                self.stopOnceButton.state = self.stopOnceButton.state == .on ? .off : .on
+                self.stopOnceToggled(); return nil
+            default: break
+            }
             // typing in any text field (search, lyrics header): let keys through
             if self.window.firstResponder is NSText { return ev }
             if ev.keyCode == 36, let fi = self.filteredIndex(forRow: self.table.selectedRow) {

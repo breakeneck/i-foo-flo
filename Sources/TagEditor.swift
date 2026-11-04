@@ -16,6 +16,13 @@ struct TagValues {
     }
 }
 
+enum TagWriterError: LocalizedError {
+    case notAudio(String), corrupted(String)
+    var errorDescription: String? {
+        switch self { case .notAudio(let m), .corrupted(let m): return m }
+    }
+}
+
 enum TagWriter {
     // MARK: text encoding: UTF-16 with BOM (universal for ID3v2.3 readers)
     private static func u16(_ s: String) -> Data {
@@ -66,6 +73,7 @@ enum TagWriter {
     }
 
     static func writeLocal(url: URL, values: TagValues) throws {
+        if url.pathExtension.lowercased() == "flac" { try writeLocalFlac(url: url, values: values); return }
         let raw = try Data(contentsOf: url)
         var off = 0
         if raw.count > 10, raw.subdata(in: 0..<3) == Data("ID3".utf8) {
@@ -79,6 +87,74 @@ enum TagWriter {
         let tmp = url.appendingPathExtension("amltmp")
         var out = buildTag(values)
         out.append(audio)
+        try out.write(to: tmp)
+        try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    // FLAC: rewrite the VORBIS_COMMENT metadata block in place, keeping all
+    // other blocks (STREAMINFO, PICTURE, PADDING...) byte-identical.
+    static func writeLocalFlac(url: URL, values: TagValues) throws {
+        let raw = try Data(contentsOf: url)
+        guard raw.count > 4, raw.subdata(in: 0..<4) == Data("fLaC".utf8) else {
+            throw TagWriterError.notAudio("не FLAC (немає магії fLaC)")
+        }
+        // collect metadata blocks: [isLast, type, payload]
+        struct Block { var last: Bool; var type: UInt8; var payload: Data }
+        var blocks: [Block] = []
+        var off = 4
+        while true {
+            guard off + 4 <= raw.count else { throw TagWriterError.corrupted("обрізаний заголовок") }
+            let hdr = raw[off]
+            let last = hdr & 0x80 != 0
+            let type = hdr & 0x7f
+            let size = (Int(raw[off + 1]) << 16) | (Int(raw[off + 2]) << 8) | Int(raw[off + 3])
+            guard off + 4 + size <= raw.count else { throw TagWriterError.corrupted("обрізаний блок") }
+            blocks.append(Block(last: last, type: type,
+                                payload: raw.subdata(in: off + 4 ..< off + 4 + size)))
+            off += 4 + size
+            if last { break }
+        }
+        // build new VORBIS_COMMENT payload
+        var comments: [String] = []
+        func add(_ key: String, _ v: String) {
+            let s = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !s.isEmpty { comments.append("\(key)=\(s)") }
+        }
+        add("ARTIST", values.artist); add("TITLE", values.title); add("ALBUM", values.album)
+        add("DATE", values.year); add("GENRE", values.genre); add("TRACKNUMBER", values.trackNo)
+        add("LENGTH", values.durationMs); add("LYRICS", values.lyrics)
+        var vc = Data()
+        func le32(_ d: inout Data, _ n: Int) {
+            d.append(contentsOf: [UInt8(n & 0xff), UInt8((n >> 8) & 0xff),
+                                  UInt8((n >> 16) & 0xff), UInt8((n >> 24) & 0xff)])
+        }
+        let vendor = Data("foobar-swift".utf8)
+        le32(&vc, vendor.count); vc.append(vendor)
+        le32(&vc, comments.count)
+        for c in comments { let cd = Data(c.utf8); le32(&vc, cd.count); vc.append(cd) }
+        // rebuild file: drop old VORBIS_COMMENT (type 4), insert fresh one
+        // right after STREAMINFO (must stay block 0)
+        var out = Data("fLaC".utf8)
+        var kept: [Block] = []
+        for b in blocks where b.type != 4 { kept.append(b) }
+        var newBlocks: [Block] = []
+        for (i, b) in kept.enumerated() {
+            newBlocks.append(b)
+            if b.type == 0 { newBlocks.append(Block(last: false, type: 4, payload: vc)) }
+        }
+        if !newBlocks.contains(where: { $0.type == 4 }) {
+            newBlocks.insert(Block(last: false, type: 4, payload: vc), at: 0)
+        }
+        for i in newBlocks.indices {
+            let b = newBlocks[i]
+            let isLast = i == newBlocks.count - 1
+            out.append(UInt8(b.type | (isLast ? 0x80 : 0)))
+            let s = b.payload.count
+            out.append(UInt8((s >> 16) & 0xff)); out.append(UInt8((s >> 8) & 0xff)); out.append(UInt8(s & 0xff))
+            out.append(b.payload)
+        }
+        out.append(raw.subdata(in: off..<raw.count))   // audio frames
+        let tmp = url.appendingPathExtension("amltmp")
         try out.write(to: tmp)
         try FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
@@ -116,8 +192,29 @@ enum TagWriter {
         print('ok')
         """
 
+    // server-side FLAC rewrite via mutagen (installed on the host)
+    static let pyFlacScript = """
+        import base64, json, sys
+        from mutagen.flac import FLAC
+        p = sys.argv[1]
+        vals = json.loads(base64.b64decode(sys.argv[2]).decode())
+        audio = FLAC(p)
+        if audio.tags is None:
+            audio.add_tags()
+        tags = audio.tags
+        for key, field in [('ARTIST','artist'),('TITLE','title'),('ALBUM','album'),
+                           ('DATE','year'),('GENRE','genre'),('TRACKNUMBER','trackNo'),
+                           ('LENGTH','durationMs'),('LYRICS','lyrics')]:
+            v = vals.get(field, '').strip()
+            if v: tags[key] = [v]
+            elif key in tags: del tags[key]
+        audio.save()
+        print('ok')
+        """
+
     static func writeRemote(host: String, path: String, values: TagValues) async throws {
-        let script = base64Encoded(Data(pyScript.utf8))
+        let isFlac = path.lowercased().hasSuffix(".flac")
+        let script = base64Encoded(Data(isFlac ? pyFlacScript.utf8 : pyScript.utf8))
         let vals = base64Encoded(Data(values.json.utf8))
         let q = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
         _ = try await Ssh.run(host: host,

@@ -157,6 +157,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                         keyEquivalent: "q")
         appItem.submenu = appMenu
 
+        // playlist/playback menu: ⌘E works from any focus (context-menu key
+        // equivalents don't register globally; menu-bar ones do)
+        let plItem = main.addItem(withTitle: "Плейлист", action: nil, keyEquivalent: "")
+        let pl = NSMenu(title: "Плейлист")
+        pl.addItem(withTitle: "Редагувати теги…", action: #selector(editTagsFromMenu), keyEquivalent: "e")
+        pl.addItem(withTitle: "Властивості файлу", action: #selector(showProperties), keyEquivalent: "")
+        pl.addItem(withTitle: "Лайкнути / зняти лайк", action: #selector(loveFromMenu), keyEquivalent: "")
+        pl.addItem(.separator())
+        pl.addItem(withTitle: "Наступний трек", action: #selector(nextTrack), keyEquivalent: "")
+        pl.item(at: pl.items.count - 1)?.keyEquivalentModifierMask = [.control]
+        pl.addItem(withTitle: "Попередній трек", action: #selector(prevTrack), keyEquivalent: "")
+        pl.item(at: pl.items.count - 1)?.keyEquivalentModifierMask = [.control]
+        plItem.submenu = pl
+
         let editItem = main.addItem(withTitle: "Правка", action: nil, keyEquivalent: "")
         let edit = NSMenu(title: "Правка")
         for (t, sel, k) in [("Виділити все", #selector(NSResponder.selectAll(_:)), "a"),
@@ -257,8 +271,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         menu.addItem(withTitle: "Перепід'єднати SSH", action: #selector(sshReconnect), keyEquivalent: "")
         menu.addItem(withTitle: "Налаштування…", action: #selector(openSettings), keyEquivalent: "")
         menu.addItem(.separator())
-        ctxEditItem = menu.addItem(withTitle: "Редагувати теги… (F2)",
-                                   action: #selector(editTagsFromMenu), keyEquivalent: "")
+        ctxEditItem = menu.addItem(withTitle: "Редагувати теги… (⌘E)",
+                                   action: #selector(editTagsFromMenu), keyEquivalent: "e")
         ctxPropsItem = menu.addItem(withTitle: "Властивості файлу",
                                     action: #selector(showProperties), keyEquivalent: "")
         ctxLoveItem = menu.addItem(withTitle: "Лайкнути / зняти лайк",
@@ -467,15 +481,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             case 1 where ctrl:   // Ctrl+S = toggle stop-after-current
                 self.stopOnceButton.state = self.stopOnceButton.state == .on ? .off : .on
                 self.stopOnceToggled(); return nil
+            case 120:    // F2 = tag editor even when search field has focus
+                self.editTagsSelected(); return nil
             default: break
             }
             // typing in any text field (search, lyrics header): let keys through
             if self.window.firstResponder is NSText { return ev }
             if ev.keyCode == 36, let fi = self.filteredIndex(forRow: self.table.selectedRow) {
                 self.playRow(fi); return nil
-            }
-            if ev.keyCode == 120 {   // F2 = tag editor for the selected track
-                self.editTagsSelected(); return nil
             }
             if ev.keyCode == 49 { self.togglePlay(); return nil }
             return ev
@@ -818,12 +831,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc func editTagsFromMenu() { editTagsSelected() }
 
     func editTagsSelected() {
-        guard let t = ctxTrack() else { return }
+        print("editTags: selectedRow=\(table.selectedRow) clickedRow=\(table.clickedRow)")
+        guard let t = ctxTrack() else { print("editTags: no ctx track"); return }
         let ext = (t.remotePath ?? t.url.path).lowercased()
-        guard ext.hasSuffix(".mp3") else {
+        guard ext.hasSuffix(".mp3") || ext.hasSuffix(".flac") else {
             let a = NSAlert()
-            a.messageText = "Редагування тегів поки що лише для MP3"
-            a.informativeText = "ID3v2.3 write-back підключено для .mp3; FLAC/інші — в плані."
+            a.messageText = "Редагування тегів поки що лише для MP3/FLAC"
+            a.informativeText = "Write-back підключено для .mp3 (ID3v2.3) та .flac (Vorbis comments); інші формати — в плані."
             a.runModal()
             return
         }

@@ -434,8 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         let stack = NSStackView(views: [prev, playButton, next, loveButton,
                                         randomButton, stopOnceButton,
-                                        seekSlider, timeLabel, lyricsButton,
-                                        NSView(), orderPopup])
+                                        seekSlider, timeLabel, orderPopup,
+                                        NSView(), lyricsButton])
         stack.orientation = .horizontal
         stack.spacing = 8
         stack.setHuggingPriority(.defaultLow, for: .horizontal)

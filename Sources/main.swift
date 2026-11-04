@@ -25,7 +25,7 @@ final class FolderNode {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
-                         NSTableViewDelegate, NSSearchFieldDelegate {
+                          NSTableViewDelegate, NSMenuDelegate, NSSearchFieldDelegate {
     static weak var shared: AppDelegate?
 
     let lib = Library()
@@ -224,7 +224,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         menu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "")
         menu.addItem(withTitle: "Перепід'єднати SSH", action: #selector(sshReconnect), keyEquivalent: "")
         menu.addItem(withTitle: "Налаштування…", action: #selector(openSettings), keyEquivalent: "")
+        menu.addItem(.separator())
+        ctxEditItem = menu.addItem(withTitle: "Редагувати теги… (F2)",
+                                   action: #selector(editTagsFromMenu), keyEquivalent: "")
+        ctxPropsItem = menu.addItem(withTitle: "Властивості файлу",
+                                    action: #selector(showProperties), keyEquivalent: "")
+        ctxLoveItem = menu.addItem(withTitle: "Лайкнути / зняти лайк",
+                                   action: #selector(loveFromMenu), keyEquivalent: "")
         for it in menu.items { it.target = self }
+        menu.delegate = self
         table.menu = menu
 
         let scroll = NSScrollView()
@@ -400,6 +408,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             if ev.keyCode == 36, let fi = self.filteredIndex(forRow: self.table.selectedRow) {
                 self.playRow(fi); return nil
             }
+            if ev.keyCode == 120 {   // F2 = tag editor for the selected track
+                self.editTagsSelected(); return nil
+            }
             if ev.keyCode == 49 { self.togglePlay(); return nil }
             return ev
         }
@@ -475,7 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refreshLastFM(for: t, row: row)
     }
 
-    private func remoteHost(for path: String) -> String? {
+    func remoteHost(for path: String) -> String? {
         for dir in Config.shared.libraryDirs {
             if let s = parseSftp(dir), path.hasPrefix(s.path) { return s.host }
         }
@@ -639,6 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     self.filtered[i].loved = info.loved
                 }
                 self.loveButton.title = info.loved ? "♥" : "♡"
+                if row == self.queueIndex { self.updateNowPlaying(self.filtered[row]) }
                 self.table.reloadData()
             }
         }
@@ -646,13 +658,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func toggleLove() {
         guard let t = currentTrack(), queueIndex >= 0 else { return }
+        loveTrack(t, row: queueIndex)
+    }
+
+    func loveTrack(_ t: Track, row: Int) {
         let target = !(t.loved ?? false)
         LastFM.shared.setLoved(t, loved: target) { [weak self] ok in
-            guard ok, let self else { return }
-            self.filtered[self.queueIndex].loved = target
-            self.loveButton.title = target ? "♥" : "♡"
+            guard ok, let self, row < self.filtered.count else { return }
+            self.filtered[row].loved = target
+            if row == self.queueIndex {
+                self.loveButton.title = target ? "♥" : "♡"
+                self.updateNowPlaying(self.filtered[row])
+            }
             self.table.reloadData()
         }
+    }
+
+    // MARK: context menu / F2 — tags, properties, love
+
+    var ctxEditItem: NSMenuItem?
+    var ctxPropsItem: NSMenuItem?
+    var ctxLoveItem: NSMenuItem?
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let has = ctxTrack() != nil
+        ctxEditItem?.isEnabled = has
+        ctxPropsItem?.isEnabled = has
+        ctxLoveItem?.isEnabled = has && LastFM.shared.isEnabled
+    }
+
+    func ctxTrack() -> Track? {
+        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        guard let fi = filteredIndex(forRow: row) else { return nil }
+        return filtered[fi]
+    }
+
+    func ctxTrackRow() -> Int? {
+        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        return filteredIndex(forRow: row)
+    }
+
+    @objc func editTagsFromMenu() { editTagsSelected() }
+
+    func editTagsSelected() {
+        guard let t = ctxTrack() else { return }
+        let ext = (t.remotePath ?? t.url.path).lowercased()
+        guard ext.hasSuffix(".mp3") else {
+            let a = NSAlert()
+            a.messageText = "Редагування тегів поки що лише для MP3"
+            a.informativeText = "ID3v2.3 write-back підключено для .mp3; FLAC/інші — в плані."
+            a.runModal()
+            return
+        }
+        TagEditorWindow.shared.edit(track: t)
+    }
+
+    @objc func showProperties() {
+        guard let t = ctxTrack() else { return }
+        let a = NSAlert()
+        a.messageText = "\(t.artist) — \(t.title)"
+        var info = "Файл: \(t.fullPath)\n"
+        if t.duration > 0 { info += "Тривалість: \(fmt(t.duration))\n" }
+        info += "Альбом: \(t.album.isEmpty ? "—" : t.album)\n"
+        info += "Плейкаунт: \(t.playcount ?? 0)   Лайк: \(t.loved == true ? "♥" : "—")\n"
+        if t.lyrics != nil { info += "Лірика вбудована в теги: так\n" }
+        a.informativeText = info + "…\n"
+        a.addButton(withTitle: "OK")
+        if t.isRemote, let rp = t.remotePath, let host = remoteHost(for: rp) {
+            Task { @MainActor in
+                if let out = try? await Ssh.run(host: host,
+                        command: "stat -c '%s' \(sqt(rp))"),
+                   let size = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    var extra = "Розмір: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))\n"
+                    if t.duration > 0 {
+                        extra += "Бітрейт: ~\(Int(Double(size) * 8 / t.duration / 1000)) kbps\n"
+                    }
+                    a.informativeText = info + extra
+                    a.runModal()
+                } else { a.runModal() }
+            }
+        } else {
+            let size = (try? t.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            if size > 0 {
+                var extra = "Розмір: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))\n"
+                if t.duration > 0 {
+                    extra += "Бітрейт: ~\(Int(Double(size) * 8 / t.duration / 1000)) kbps\n"
+                }
+                info += extra
+            }
+            a.informativeText = info
+            a.runModal()
+        }
+    }
+
+    @objc func loveFromMenu() {
+        guard let t = ctxTrack(), let row = ctxTrackRow() else { return }
+        loveTrack(t, row: row)
     }
 
     // MARK: lyrics
@@ -770,7 +871,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func updateNowPlaying(_ t: Track) {
-        nowLabel.stringValue = "\(t.artist.isEmpty ? "" : t.artist + " — ")\(t.title)"
+        nowLabel.stringValue = (t.loved == true ? "♥ " : "")
+            + "\(t.artist.isEmpty ? "" : t.artist + " — ")\(t.title)"
         window.title = "\(t.title) — FooBar Swift"
         var info: [String: Any] = [
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,

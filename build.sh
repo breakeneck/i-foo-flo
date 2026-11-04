@@ -11,7 +11,7 @@ swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 \
     -framework AppKit -framework AVFoundation -framework MediaPlayer -framework Network \
     -o "$BIN.tmp" Sources/main.swift Sources/Config.swift Sources/Library.swift \
     Sources/Player.swift Sources/Lyrics.swift Sources/LyricsCache.swift Sources/LastFM.swift \
-    Sources/Sftp.swift Sources/Settings.swift Sources/FmCache.swift
+    Sources/Sftp.swift Sources/Settings.swift Sources/TagEditor.swift Sources/FmCache.swift
 mv "$BIN.tmp" "$BIN"
 
 # icon from the Python app's glyph

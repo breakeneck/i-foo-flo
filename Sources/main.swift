@@ -345,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         nowLabel.font = .systemFont(ofSize: 11)
 
         let stack = NSStackView(views: [prev, playButton, next, loveButton, seekSlider,
-                                        timeLabel, volSlider, lyricsButton,
+                                        timeLabel, lyricsButton,
                                         NSView(), orderPopup, stopPopup])
         stack.orientation = .horizontal
         stack.spacing = 8
@@ -359,7 +359,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         sshButton.font = .systemFont(ofSize: 11)
         sshButton.toolTip = "SSH-з'єднання з сервером (клік = реконект)"
         let nowStack = NSStackView(views: [NSTextField(labelWithString: "Грає:"), nowLabel])
+        let volIcon = NSTextField(labelWithString: "🔊")
+        volIcon.font = .systemFont(ofSize: 11)
+        let volStack = NSStackView(views: [volIcon, volSlider])   // volume lives in the
+        volStack.orientation = .horizontal                        // "Грає" row, like the
+        volStack.translatesAutoresizingMaskIntoConstraints = false    // connection status
         content.addSubview(sshButton)
+        content.addSubview(volStack)
         nowStack.orientation = .horizontal
         nowStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(nowStack)
@@ -373,7 +379,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             nowStack.bottomAnchor.constraint(equalTo: stack.topAnchor, constant: -8),
             sshButton.centerYAnchor.constraint(equalTo: nowStack.centerYAnchor),
             sshButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            nowStack.trailingAnchor.constraint(lessThanOrEqualTo: sshButton.leadingAnchor, constant: -8),
+            volStack.centerYAnchor.constraint(equalTo: nowStack.centerYAnchor),
+            volStack.trailingAnchor.constraint(equalTo: sshButton.leadingAnchor, constant: -14),
+            nowStack.trailingAnchor.constraint(lessThanOrEqualTo: volStack.leadingAnchor, constant: -8),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),

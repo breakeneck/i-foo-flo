@@ -58,7 +58,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
     var treeRoots: [FolderNode] = []
-    var folderFilter: String?    // dir path set by tree click; nil = all
+    var folderFilter: String? {   // dir path set by tree click; nil = all
+        didSet {
+            guard isReady, folderChip != nil else { return }
+            if let f = folderFilter {
+                folderChip.title = "📁 фільтр: \((f as NSString).lastPathComponent) — клік, щоб скинути"
+                folderChip.isHidden = false
+            } else {
+                folderChip.isHidden = true
+            }
+        }
+    }
+    var isReady = false
+    var folderChip: NSButton!
     var currentPlayingPath: String?
     var lyricsVisible = false
     var scrubbing = false
@@ -112,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             if p1 > 0, self.lyricsVisible { self.lyricsSplit.setPosition(p1, ofDividerAt: 1) }
         }
         updateSshStatus()
+        isReady = true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
@@ -304,7 +317,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
         lyricsSplit.addArrangedSubview(treeScroll)
         // playlist pane: search on top, table below — lives inside the middle column
-        let playlistPane = NSStackView(views: [search, scroll])
+        folderChip = NSButton(title: "", target: self, action: #selector(clearFolderFilter))
+        folderChip.bezelStyle = .inline
+        folderChip.font = .systemFont(ofSize: 11)
+        folderChip.isHidden = true
+        folderChip.toolTip = "Клік — прибрати фільтр по директорії"
+        let playlistPane = NSStackView(views: [search, folderChip, scroll])
         playlistPane.orientation = .vertical
         playlistPane.alignment = .leading
         playlistPane.spacing = 6

@@ -13,6 +13,7 @@ struct Track {
     var folder: String      // grouping header (album folder)
     var playcount: Int?     // last.fm scrobbles, filled lazily
     var loved: Bool?        // last.fm love state, filled lazily
+    var lyrics: String?     // lyrics embedded in file tags (USLT/LYRICS)
 
     var isRemote: Bool { remotePath != nil }
 
@@ -106,7 +107,7 @@ final class Library {
                             : cleanName(url.deletingLastPathComponent().lastPathComponent)
                         outTracks.append(Track(url: url, title: title, artist: artist, album: album,
                                                duration: dur, remotePath: nil, folder: folder,
-                                               playcount: nil, loved: nil))
+                                               playcount: nil, loved: nil, lyrics: nil))
         }
         return outTracks
     }
@@ -121,6 +122,8 @@ final class Library {
             return []
         }
         print("ssh find ok: \(out.split(separator: "\n").count) files")
+        let tags = await fetchRemoteTags(host: host, root: root)
+        print("ssh tags ok: \(tags.count) files tagged")
         var outTracks: [Track] = []
         for line in out.split(separator: "\n") {
             let path = String(line)
@@ -164,17 +167,180 @@ final class Library {
             // parent dir is an album when there is a deeper artist level
             var album = ""
             if !grandparent.isEmpty && !generic { album = cleanName(parent) }
+            // grouping header stays path-derived; tags only fill artist/title/album/duration
             let folder = !album.isEmpty ? album : cleanName(parent)
+            // ID3 tags win over filename/path guessing
+            var dur: TimeInterval = 0
+            var embeddedLyrics: String?
+            if let tg = tags[path] {
+                if !tg.artist.isEmpty { artist = tg.artist }
+                if !tg.title.isEmpty { title = tg.title }
+                if !tg.album.isEmpty { album = tg.album }
+                dur = tg.duration
+                embeddedLyrics = tg.lyrics
+            }
             outTracks.append(Track(url: URL(string: "about:blank")!, title: title,
-                                   artist: artist, album: album, duration: 0,
+                                   artist: artist, album: album, duration: dur,
                                    remotePath: path, folder: folder,
-                                   playcount: nil, loved: nil))
+                                   playcount: nil, loved: nil, lyrics: embeddedLyrics))
         }
         for t in outTracks.prefix(3) {
             print("parsed: artist=[\(t.artist)] title=[\(t.title)] album=[\(t.album)] folder=[\(t.folder)]")
         }
         return outTracks
     }
+}
+
+// MARK: remote ID3 tags (read server-side in one ssh call)
+
+struct RemoteTag {
+    var artist = "", title = "", album = "", lyrics = ""
+    var duration: TimeInterval = 0
+}
+
+private let tagScript = #"""
+import os, sys, struct, json, subprocess
+
+def synchsafe(b):
+    return (b[0]<<21)|(b[1]<<14)|(b[2]<<7)|b[3]
+
+def dec_text(body):
+    if not body: return ""
+    enc = body[0]
+    try:
+        if enc == 0: s = body[1:].decode("latin1")
+        elif enc == 1: s = body[1:].decode("utf-16", errors="replace")
+        elif enc == 2: s = body[1:].decode("utf-16-be", errors="replace")
+        else: s = body[1:].decode("utf-8", errors="replace")
+    except Exception:
+        s = body[1:].decode("latin1", errors="replace")
+    return s.strip("\x00").strip()
+
+def uslt_text(body):
+    # [enc][lang(3)][desc]\x00[text]  — some taggers store full LRC here
+    if not body: return ""
+    enc = body[0]
+    rest = body[1:]
+    try:
+        rest2 = rest[3:]  # drop language code
+        if enc in (1, 2):
+            i = 0
+            while i+1 < len(rest2):
+                if rest2[i] == 0 and rest2[i+1] == 0: break
+                i += 2
+            txt = rest2[i+2:]
+            return txt.decode("utf-16" if enc == 1 else "utf-16-be",
+                              errors="replace").strip("\x00").strip()
+        i = rest2.find(b"\x00")
+        txt = rest2[i+1:] if i >= 0 else rest2
+        return txt.decode("latin1" if enc == 0 else "utf-8",
+                          errors="replace").strip("\x00").strip()
+    except Exception:
+        return dec_text(body)
+
+def id3(path):
+    with open(path, "rb") as fh:
+        h = fh.read(10)
+        if h[:3] != b"ID3": return None
+        ver = h[3]; flags = h[5]
+        size = synchsafe(h[6:10])
+        data = fh.read(size)
+    if ver >= 3 and (flags & 0x40):  # extended header
+        eh = synchsafe(data[0:4]) if ver == 4 else struct.unpack(">I", data[0:4])[0]
+        data = data[4+eh:]
+    fidlen = 3 if ver == 2 else 4
+    hdrlen = fidlen + (3 if ver == 2 else 6)
+    out = {}
+    p = 0
+    while p + hdrlen <= len(data) and data[p] != 0:
+        fid = data[p:p+fidlen].decode("latin1").rstrip("\x00")
+        if ver >= 4: sz = synchsafe(data[p+4:p+8])
+        elif ver == 3: sz = struct.unpack(">I", data[p+4:p+8])[0]
+        else: sz = (data[p+3]<<16)|(data[p+4]<<8)|data[p+5]
+        if sz == 0 or p+hdrlen+sz > len(data): break
+        body = data[p+hdrlen:p+hdrlen+sz]
+        if fid in ("TPE1","TP1") and "artist" not in out: out["artist"] = dec_text(body)
+        elif fid in ("TIT2","TT2") and "title" not in out: out["title"] = dec_text(body)
+        elif fid in ("TALB","TAL") and "album" not in out: out["album"] = dec_text(body)
+        elif fid in ("TLEN","TLE") and "duration" not in out:
+            try: out["duration"] = int(dec_text(body))//1000
+            except Exception: pass
+        elif fid in ("USLT","ULT") and "lyrics" not in out: out["lyrics"] = uslt_text(body)
+        p += hdrlen + sz
+    return out
+
+def flac_tags(path):
+    with open(path, "rb") as fh:
+        if fh.read(4) != b"fLaC": return None
+        out = {}
+        while True:
+            hb = fh.read(4)
+            if len(hb) < 4: break
+            btype = hb[0] & 0x7f; last = hb[0] & 0x80
+            sz = int.from_bytes(hb[1:4], "little")
+            block = fh.read(sz)
+            if btype == 4:  # VORBIS_COMMENT
+                p = 0
+                p += int.from_bytes(block[p:p+4], "little") + 4  # vendor
+                n = int.from_bytes(block[p:p+4], "little"); p += 4
+                for _ in range(n):
+                    l = int.from_bytes(block[p:p+4], "little"); p += 4
+                    c = block[p:p+l]; p += l
+                    try: s = c.decode("utf-8")
+                    except Exception: continue
+                    if "=" not in s: continue
+                    k, v = s.split("=", 1)
+                    k = k.upper()
+                    if k == "ARTIST" and "artist" not in out: out["artist"] = v
+                    elif k == "TITLE" and "title" not in out: out["title"] = v
+                    elif k == "ALBUM" and "album" not in out: out["album"] = v
+                    elif k == "LENGTH" and "duration" not in out:
+                        try: out["duration"] = int(v)//1000
+                        except Exception: pass
+                    elif k in ("LYRICS","UNSYNCEDLYRICS") and "lyrics" not in out: out["lyrics"] = v
+            if last: break
+        return out
+
+root = sys.argv[1]
+r = subprocess.run(["find", root, "-type", "f", "(",
+                    "-iname", "*.mp3", "-o", "-iname", "*.m4a", "-o", "-iname", "*.aac",
+                    "-o", "-iname", "*.flac", "-o", "-iname", "*.wav", ")", "-print0"],
+                   capture_output=True)
+for f in r.stdout.split(b"\x00"):
+    if not f: continue
+    fp = f.decode("utf-8", "surrogateescape")
+    t = None
+    try:
+        if fp.lower().endswith(".flac"):
+            t = flac_tags(fp)
+        if t is None:
+            t = id3(fp)
+    except Exception:
+        t = None
+    print(json.dumps({"p": fp, "t": t or {}}, ensure_ascii=False))
+"""#
+
+func fetchRemoteTags(host: String, root: String) async -> [String: RemoteTag] {
+    let cmd = "python3 - \(sqt(root)) <<'FBS_PY'\n\(tagScript)\nFBS_PY"
+    guard let out = try? await Ssh.run(host: host, command: cmd, timeout: 300) else {
+        print("ssh tag fetch FAILED host=\(host)")
+        return [:]
+    }
+    var map: [String: RemoteTag] = [:]
+    for line in out.split(separator: "\n") {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let p = obj["p"] as? String,
+              let t = obj["t"] as? [String: Any] else { continue }
+        var tag = RemoteTag()
+        tag.artist = (t["artist"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+        tag.title = (t["title"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+        tag.album = (t["album"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+        tag.lyrics = (t["lyrics"] as? String) ?? ""
+        tag.duration = TimeInterval(t["duration"] as? Int ?? 0)
+        map[p] = tag
+    }
+    return map
 }
 
 /// strip "01 - " track prefixes and trailing "(2000)" years from display names

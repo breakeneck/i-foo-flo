@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsText: NSTextView!
     var lyricsHeader: NSTextField!
     var lyricsScroll: NSScrollView!
+    var lyricsPane: NSStackView?
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
     var treeRoots: [FolderNode] = []
@@ -79,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     // state
     var currentLyrics: LyricsResult?
+    var lastLyricsIdx = -1
     var lyricsReqSeq = 0
     var lastScrobbledPath: String?
     var playStartTime: Date?
@@ -182,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         let viewItem = main.addItem(withTitle: "Вигляд", action: nil, keyEquivalent: "")
         let view = NSMenu(title: "Вигляд")
-        view.addItem(withTitle: "Тексти пісень", action: #selector(toggleLyrics), keyEquivalent: "l")
+        lyricsMenuItem = view.addItem(withTitle: "Тексти пісень", action: #selector(toggleLyrics), keyEquivalent: "l")
         viewItem.submenu = view
 
         NSApp.mainMenu = main
@@ -192,12 +194,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc func rescan() { lib.scan() }
     @objc func toggleLyrics() { setLyricsVisible(!lyricsVisible) }
 
+    var lyricsMenuItem: NSMenuItem?
+
     func setLyricsVisible(_ visible: Bool) {
         lyricsVisible = visible
         lyricsScroll?.isHidden = !visible
+        lyricsPane?.isHidden = !visible
+        lyricsMenuItem?.state = visible ? .on : .off
         Config.shared.lyricsEnabled = visible
-        if visible, let split = lyricsSplit {
-            split.setPosition(split.bounds.width * 0.62, ofDividerAt: 1)
+        if let split = lyricsSplit {
+            if visible {
+                split.setPosition(split.bounds.width * 0.62, ofDividerAt: 1)
+            } else {
+                split.setPosition(split.bounds.width - 1, ofDividerAt: 1)
+            }
             Config.shared.splitPos1 = dividerPos(split, 1)
         }
         if visible, currentTrack() != nil, currentLyrics == nil {
@@ -352,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsSplit.addArrangedSubview(playlistPane)
         // lyrics pane: editable target header on top, text below
         let lyricsPane = NSStackView(views: [lyricsHeader, lscroll])
+        self.lyricsPane = lyricsPane
         lyricsPane.orientation = .vertical
         lyricsPane.alignment = .leading
         lyricsPane.spacing = 4
@@ -557,18 +568,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let key = currentPlayingKey ?? (queueIndex >= 0 && queueIndex < filtered.count
             ? trackKey(filtered[queueIndex]) : nil)
         guard let key else { return }
+        // Already visible in the current view (e.g. whole library shown):
+        // just select + scroll, don't touch search or the tree/folder filter.
+        if let fi = filtered.firstIndex(where: { trackKey($0) == key }),
+           let row = row(forFilteredIndex: fi) {
+            selectAndRevealRow(row, fi: fi)
+            return
+        }
         if !search.stringValue.isEmpty {
             search.stringValue = ""
             applyFilter()
+            if let fi = filtered.firstIndex(where: { trackKey($0) == key }),
+               let row = row(forFilteredIndex: fi) {
+                selectAndRevealRow(row, fi: fi)
+                return
+            }
         }
         locateCurrentFolder()   // selects tree node → folderFilter → applyFilter
         guard let fi = filtered.firstIndex(where: { trackKey($0) == key }) else { return }
-        queueIndex = fi
-        let row = rows.firstIndex { item in
+        if let row = row(forFilteredIndex: fi) { selectAndRevealRow(row, fi: fi) }
+    }
+
+    func row(forFilteredIndex fi: Int) -> Int? {
+        rows.firstIndex { item in
             if case .track(let i) = item, i == fi { return true }
             return false
-        } ?? -1
-        guard row >= 0 else { return }
+        }
+    }
+
+    func selectAndRevealRow(_ row: Int, fi: Int) {
+        queueIndex = fi
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         table.scrollRowToVisible(row)
         window.makeFirstResponder(table)
@@ -988,6 +1017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func renderLyrics(_ r: LyricsResult?) {
+        lastLyricsIdx = -1
         guard let r else {
             lyricsText.string = "— нічого не знайшов —"
             return
@@ -995,6 +1025,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let src = "\n\n— \(r.source) —"
         if !r.synced.isEmpty {
             lyricsText.string = r.synced.map(\.text).joined(separator: "\n") + src
+            // dim base: the active line gets highlighted by lyricsTick
+            if let ts = lyricsText.textStorage {
+                ts.setAttributes([
+                    .font: NSFont.systemFont(ofSize: 14),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ], range: NSRange(location: 0, length: ts.length))
+            }
         } else {
             lyricsText.string = (r.plain ?? "") + src
         }
@@ -1002,22 +1039,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func lyricsTick(_ cur: TimeInterval) {
         guard let r = currentLyrics, !r.synced.isEmpty, lyricsVisible else { return }
-        let idx = r.synced.lastIndex { $0.time <= cur } ?? 0
-        let lines = lyricsText.string.components(separatedBy: "\n")
-        guard idx < lines.count, let lm = lyricsText.layoutManager else { return }
+        let idx = max(0, r.synced.lastIndex { $0.time <= cur } ?? 0)
+        guard idx != lastLyricsIdx, let ts = lyricsText.textStorage,
+              let container = lyricsText.textContainer,
+              let lm = lyricsText.layoutManager else { return }
+        lastLyricsIdx = idx
+        let ns = ts.string as NSString
+        // dim everything, then bold + full-color the active line
+        ts.setAttributes([
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ], range: NSRange(location: 0, length: ns.length))
         var pos = 0
-        for i in 0..<idx { pos += lines[i].count + 1 }
-        let ns = lyricsText.string as NSString
+        for i in 0..<idx { pos += r.synced[i].text.count + 1 }
+        guard pos < ns.length else { return }
         var start = pos
         while start > 0 && ns.character(at: start - 1) != 10 { start -= 1 }
         var end = pos
         while end < ns.length && ns.character(at: end) != 10 { end += 1 }
         let para = NSRange(location: start, length: end - start)
-        lyricsText.layoutManager?.setTemporaryAttributes([
-            NSAttributedString.Key.foregroundColor: NSColor.labelColor,
-            NSAttributedString.Key.font: NSFont.systemFont(ofSize: 15, weight: .semibold),
-        ], forCharacterRange: para)
-        lyricsText.scrollRangeToVisible(para)
+        ts.addAttributes([
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ], range: para)
+        // keep the active line centered in the visible area
+        if let clip = lyricsText.enclosingScrollView?.contentView {
+            let lineRect = lm.boundingRect(forGlyphRange: NSRange(location: start, length: 1),
+                                           in: container)
+            let maxY = max(0, lyricsText.frame.height - clip.bounds.height)
+            let y = min(max(0, lineRect.midY - clip.bounds.height / 2), maxY)
+            clip.scroll(NSPoint(x: 0, y: y))
+        }
     }
 
     // MARK: media keys

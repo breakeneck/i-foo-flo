@@ -1001,6 +1001,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if !t.artist.isEmpty { info[MPMediaItemPropertyArtist] = t.artist }
         if !t.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = t.album }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        // album art: async extract (AVAsset reads ID3 locally and over the
+        // loopback proxy), attach only if this track is still the current one
+        let trackURL = t.url
+        ArtworkCache.shared.image(for: trackURL) { [weak self] img in
+            print("artwork: " + (img == nil ? "none" : "OK \(img!.size)") + " for \(trackURL.lastPathComponent)")
+            guard let self, let img,
+                  self.queueIndex >= 0, self.queueIndex < self.filtered.count,
+                  self.filtered[self.queueIndex].url == trackURL,
+                  var info = MPNowPlayingInfoCenter.default().nowPlayingInfo,
+                  info[MPMediaItemPropertyArtwork] == nil else { return }
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
         if LastFM.shared.isEnabled, !t.artist.isEmpty {
             LastFM.shared.updateNowPlaying(artist: t.artist, title: t.title)
         }

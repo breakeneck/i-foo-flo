@@ -17,6 +17,12 @@ struct Track {
 
     var isRemote: Bool { remotePath != nil }
 
+    /// full path to the file — default sort key, shown in the Full Path column
+    var fullPath: String {
+        if let rp = remotePath { return rp }
+        return url.path
+    }
+
     /// directory containing the track — used by the folder tree
     var dirPath: String {
         if let rp = remotePath { return (rp as NSString).deletingLastPathComponent }

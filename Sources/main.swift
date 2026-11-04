@@ -213,6 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let cols: [(String, String, CGFloat)] = [
             ("love", "♥", 30), ("title", "Назва", 280), ("artist", "Артист", 150),
             ("album", "Альбом", 150), ("dur", "Час", 55), ("plays", "▶", 40),
+            ("path", "Full Path", 420),
         ]
         for (id, name, w) in cols {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -746,6 +747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 switch key {
                 case "artist": va = a.artist; vb = b.artist
                 case "album":  va = a.album;  vb = b.album
+                case "path":   va = a.fullPath; vb = b.fullPath
                 case "plays":  va = String(format: "%09d", a.playcount ?? -1)
                               vb = String(format: "%09d", b.playcount ?? -1)
                 case "love":   va = a.loved == true ? "1" : "0"
@@ -756,19 +758,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 return sortAsc ? c == .orderedAscending : c == .orderedDescending
             }
         } else {
-            // default view: by directory path — identical order to the folder tree —
-// then natural track-number order inside the folder
-            let roots: [String] = Config.shared.libraryDirs.map { dir in
-                dir.hasPrefix("sftp://") ? (parseSftp(dir)?.path ?? dir)
-                                         : (dir as NSString).expandingTildeInPath
-            }
-            func rank(_ p: String) -> Int {
-                for (i, r) in roots.enumerated() where p == r || p.hasPrefix(r + "/") { return i }
-                return roots.count
-            }
+            // default view: full file path — identical order to the folder tree;
+            // inside a folder, natural track-number order
             filtered.sort { a, b in
-                let ra = rank(a.dirPath), rb = rank(b.dirPath)
-                if ra != rb { return ra < rb }
                 let c = a.dirPath.localizedCaseInsensitiveCompare(b.dirPath)
                 if c != .orderedSame { return c == .orderedAscending }
                 return a.title.localizedStandardCompare(b.title) == .orderedAscending
@@ -873,6 +865,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case "album": text = t.album
         case "dur": text = t.duration > 0 ? fmt(t.duration) : ""
         case "plays": text = (t.playcount ?? 0) > 0 ? String(t.playcount!) : ""
+        case "path": text = t.fullPath
         default: text = ""
         }
         let cellId = NSUserInterfaceItemIdentifier("cell")

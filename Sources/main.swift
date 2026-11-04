@@ -1205,26 +1205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func numberOfRows(in tv: NSTableView) -> Int { rows.count }
 
-    func tableView(_ tv: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .header = rows[row] { return true }
-        return false
-    }
-
-    func tableView(_ tv: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        guard case .header(let folder) = rows[row] else { return nil }
-        let rv = NSTableRowView()
-        let label = NSTextField(labelWithString: folder)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        rv.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: rv.leadingAnchor, constant: 6),
-            label.centerYAnchor.constraint(equalTo: rv.centerYAnchor),
-        ])
-        return rv
-    }
-
+    // group headers are rendered as plain rows (isGroupRow would add AppKit's
+    // section padding and make them look ~2 rows tall)
     func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 18 }
         return 20
@@ -1248,6 +1230,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
+        if case .header(let folder) = rows[row] {
+            guard col?.identifier.rawValue == "title" else { return nil }
+            let id = NSUserInterfaceItemIdentifier("grouphdr")
+            let tf = (tv.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
+                let t = NSTextField(labelWithString: "")
+                t.identifier = id
+                t.font = .systemFont(ofSize: 11, weight: .semibold)
+                t.textColor = .secondaryLabelColor
+                t.lineBreakMode = .byTruncatingMiddle
+                return t
+            }()
+            tf.stringValue = folder
+            return tf
+        }
         guard let fi = filteredIndex(forRow: row), let id = col?.identifier.rawValue else { return nil }
         // hydrate last.fm state from the local cache without a network hit
         if filtered[fi].loved == nil, LastFM.shared.isEnabled, !filtered[fi].artist.isEmpty,

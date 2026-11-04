@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var window: NSWindow!
     var table: NSTableView!
     var search: NSSearchField!
-    var nowLabel: NSTextField!
+    var nowLabel: NSButton!
     var seekSlider: NSSlider!
     var volSlider: NSSlider!
     var timeLabel: NSTextField!
@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var isReady = false
     var folderChip: NSButton!
     var currentPlayingPath: String?
+    var currentPlayingKey: String?
     var lyricsVisible = false
     var scrubbing = false
 
@@ -406,9 +407,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         volSlider.isContinuous = true
         volSlider.controlSize = .small
 
-        nowLabel = NSTextField(labelWithString: "—")
-        nowLabel.lineBreakMode = .byTruncatingMiddle
+        nowLabel = NSButton(title: "—", target: self, action: #selector(revealNowPlaying))
+        nowLabel.isBordered = false
+        nowLabel.bezelStyle = .inline
         nowLabel.font = .systemFont(ofSize: 11)
+        nowLabel.contentTintColor = .secondaryLabelColor
+        nowLabel.cell?.lineBreakMode = .byTruncatingMiddle
+        nowLabel.toolTip = "Клік — знайти та виділити цей трек у плейлисті"
+        nowLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let stack = NSStackView(views: [prev, playButton, next, loveButton,
                                         randomButton, stopOnceButton,
@@ -545,6 +551,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func trackKey(_ t: Track) -> String { t.remotePath ?? t.url.path }
 
+    /// Click on the 'Грає:' title: clear anything that could hide the current
+    /// track, select its folder in the tree, then select + scroll to its row.
+    @objc func revealNowPlaying() {
+        let key = currentPlayingKey ?? (queueIndex >= 0 && queueIndex < filtered.count
+            ? trackKey(filtered[queueIndex]) : nil)
+        guard let key else { return }
+        if !search.stringValue.isEmpty {
+            search.stringValue = ""
+            applyFilter()
+        }
+        locateCurrentFolder()   // selects tree node → folderFilter → applyFilter
+        guard let fi = filtered.firstIndex(where: { trackKey($0) == key }) else { return }
+        queueIndex = fi
+        let row = rows.firstIndex { item in
+            if case .track(let i) = item, i == fi { return true }
+            return false
+        } ?? -1
+        guard row >= 0 else { return }
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        table.scrollRowToVisible(row)
+        window.makeFirstResponder(table)
+    }
+
     func playRow(_ row: Int) {
         guard row >= 0, row < filtered.count else { return }
         scrobbleIfNeeded()
@@ -556,6 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         player.play(t)
         currentPlayingPath = t.dirPath
+        currentPlayingKey = trackKey(t)
         locateCurrentFolder()
         playStartTime = Date()
         playedSeconds = 0
@@ -1002,7 +1032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func updateNowPlaying(_ t: Track) {
-        nowLabel.stringValue = (t.loved == true ? "♥ " : "")
+        nowLabel.title = (t.loved == true ? "♥ " : "")
             + "\(t.artist.isEmpty ? "" : t.artist + " — ")\(t.title)"
         window.title = "\(t.title) — FooBar Swift"
         var info: [String: Any] = [

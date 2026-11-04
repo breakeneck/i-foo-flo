@@ -202,7 +202,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         search.delegate = self
         search.target = self
         search.action = #selector(filterChanged)
-        content.addSubview(search)
 
         table = NSTableView()
         table.dataSource = self
@@ -264,8 +263,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsSplit.dividerStyle = .thin
         lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
         lyricsSplit.addArrangedSubview(treeScroll)
-        lyricsSplit.addArrangedSubview(scroll)
+        // playlist pane: search on top, table below — lives inside the middle column
+        let playlistPane = NSStackView(views: [search, scroll])
+        playlistPane.orientation = .vertical
+        playlistPane.alignment = .leading
+        playlistPane.spacing = 6
+        search.widthAnchor.constraint(equalTo: playlistPane.widthAnchor).isActive = true
+        scroll.widthAnchor.constraint(equalTo: playlistPane.widthAnchor).isActive = true
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        scroll.setContentCompressionResistancePriority(.required, for: .vertical)
+        search.setContentHuggingPriority(.required, for: .vertical)
+        lyricsSplit.addArrangedSubview(playlistPane)
         lyricsSplit.addArrangedSubview(lscroll)
+        for v in [treeScroll, lscroll] {
+            v.setContentHuggingPriority(.defaultLow, for: .vertical)
+            v.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
         content.addSubview(lyricsSplit)
 
         // transport
@@ -317,10 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         content.addSubview(nowStack)
 
         NSLayoutConstraint.activate([
-            search.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
-            search.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            search.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            lyricsSplit.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8),
+            lyricsSplit.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
             lyricsSplit.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             lyricsSplit.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             lyricsSplit.bottomAnchor.constraint(equalTo: nowStack.topAnchor, constant: -8),

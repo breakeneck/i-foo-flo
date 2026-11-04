@@ -60,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
     var treeRoots: [FolderNode] = []
+    var treeSearch: NSSearchField!
+    var treeQuery = ""
+    var treeDisplayRoots: [FolderNode] = []
+    var displayRoots: [FolderNode] { treeQuery.isEmpty ? treeRoots : treeDisplayRoots }
     var folderFilter: String?   // dir path set by tree click; nil = all (tree itself shows which)
     var isReady = false
     var currentPlayingPath: String?
@@ -327,11 +331,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         treeScroll.documentView = outline
         treeScroll.hasVerticalScroller = true
 
+        // folder filter input: typing narrows the tree to matching dirs
+        treeSearch = NSSearchField(frame: .zero)
+        treeSearch.placeholderString = "Фільтр папок…"
+        treeSearch.toolTip = "Показати лише директорії, що співпадають з введенням"
+        treeSearch.target = self
+        treeSearch.action = #selector(treeFilterChanged)
+        let treePane = NSStackView(views: [treeSearch, treeScroll])
+        treePane.orientation = .vertical
+        treePane.alignment = .leading
+        treePane.spacing = 6
+        treeSearch.widthAnchor.constraint(equalTo: treePane.widthAnchor).isActive = true
+        treeScroll.widthAnchor.constraint(equalTo: treePane.widthAnchor).isActive = true
+        treeScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        treeScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        treeScroll.setContentCompressionResistancePriority(.required, for: .vertical)
+        treeSearch.setContentHuggingPriority(.required, for: .vertical)
+
         lyricsSplit = NSSplitView()
         lyricsSplit.isVertical = true
         lyricsSplit.dividerStyle = .thin
         lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
-        lyricsSplit.addArrangedSubview(treeScroll)
+        lyricsSplit.addArrangedSubview(treePane)
         // playlist pane: search on top, table below — lives inside the middle column
         let playlistPane = NSStackView(views: [search, scroll])
         playlistPane.orientation = .vertical
@@ -471,6 +492,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 if !self.search.stringValue.isEmpty {
                     self.search.stringValue = ""
                     self.filterChanged()
+                    return nil
+                }
+                if !self.treeSearch.stringValue.isEmpty {
+                    self.treeSearch.stringValue = ""
+                    self.treeFilterChanged()
                     return nil
                 }
                 self.window.miniaturize(nil); return nil
@@ -1295,15 +1321,50 @@ extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
         treeRoots = roots
         outline.reloadData()
         for r in roots { outline.expandItem(r) }
+        if !treeQuery.isEmpty { treeFilterChanged() }
+    }
+
+    // MARK: tree filter input
+
+    @objc func treeFilterChanged() {
+        let q = treeSearch.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        treeQuery = q
+        if q.isEmpty {
+            treeDisplayRoots = []
+            outline.reloadData()
+            for r in treeRoots { outline.expandItem(r) }
+            return
+        }
+        treeDisplayRoots = treeRoots.compactMap { filterTree($0, q) }
+        outline.reloadData()
+        outline.expandItem(nil, expandChildren: true)
+    }
+
+    /// keep node if its name matches (with full subtree) or any descendant matches (with the matching branches)
+    func filterTree(_ n: FolderNode, _ q: String) -> FolderNode? {
+        if n.name.lowercased().contains(q) {
+            let c = FolderNode(name: n.name, path: n.path)
+            fillClone(n, into: c)
+            return c
+        }
+        let kept = n.children.compactMap { filterTree($0, q) }
+        guard !kept.isEmpty else { return nil }
+        let c = FolderNode(name: n.name, path: n.path)
+        for k in kept { fillClone(k, into: c.child(k.name, k.path)) }
+        return c
+    }
+
+    func fillClone(_ from: FolderNode, into to: FolderNode) {
+        for ch in from.sortedChildren { fillClone(ch, into: to.child(ch.name, ch.path)) }
     }
 
     func outlineView(_ ov: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let n = item as? FolderNode else { return treeRoots.count }
+        guard let n = item as? FolderNode else { return displayRoots.count }
         return n.sortedChildren.count
     }
     func outlineView(_ ov: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if let n = item as? FolderNode { return n.sortedChildren[index] }
-        return treeRoots[index]
+        return displayRoots[index]
     }
     func outlineView(_ ov: NSOutlineView, isItemExpandable item: Any) -> Bool {
         guard let n = item as? FolderNode else { return true }
@@ -1338,6 +1399,10 @@ extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// expand + select the tree node of the currently playing track
     func locateCurrentFolder() {
         guard let path = currentPlayingPath else { return }
+        if !treeQuery.isEmpty {
+            treeSearch.stringValue = ""
+            treeFilterChanged()
+        }
         var chain: [FolderNode] = []
         func walk(_ node: FolderNode, _ acc: [FolderNode]) -> Bool {
             let here = acc + [node]

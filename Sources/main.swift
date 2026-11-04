@@ -524,47 +524,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     // background: fill playcount/loved for the whole library, 1 track per ~1.1s,
     // results live in the SQLite cache so this runs once a week per track
+    // MARK: Last.fm import (playcounts + loved) — background, cancellable, progress
+    static let fmImportProgress = Notification.Name("FmImportProgress")
+    var importRunning = false
+    var importCancel = false
+    private var importSeq = 0
+
+    func publishImport(done: Int, total: Int, finished: Bool) {
+        NotificationCenter.default.post(name: Self.fmImportProgress, object: nil,
+            userInfo: ["done": done, "total": total, "finished": finished,
+                       "cancelled": importCancel])
+    }
+
+    func startFullImport() {
+        importSeq += 1
+        let seq = importSeq
+        importCancel = false
+        guard LastFM.shared.isEnabled else { return }
+        importRunning = true
+        publishImport(done: 0, total: 0, finished: false)
+        Task { @MainActor in
+            await LastFM.shared.login()
+            await self.runImport(seq: seq, force: true)
+        }
+    }
+
+    @MainActor
+    func runImport(seq: Int, force: Bool) async {
+        let targets = lib.tracks.indices.filter {
+            !lib.tracks[$0].artist.isEmpty
+                && (force || FmCache.shared.needsLookup(artist: lib.tracks[$0].artist,
+                                                        title: lib.tracks[$0].title))
+        }
+        let total = targets.count
+        var done = 0
+        var fails = 0
+        publishImport(done: 0, total: total, finished: false)
+        for i in targets {
+            guard seq == importSeq, !importCancel else { break }
+            if let info = await LastFM.shared.info(for: lib.tracks[i], force: force) {
+                lib.updateStats(at: i, playcount: info.playcount, loved: info.loved)
+                fails = 0
+            } else {
+                fails += 1
+            }
+            done += 1
+            if done % 15 == 0 {
+                publishImport(done: done, total: total, finished: false)
+                applyFilter()
+            }
+            // rate-limit / network trouble → back off instead of hammering
+            if fails >= 3 {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                fails = 0
+            }
+            try? await Task.sleep(nanoseconds: 1_100_000_000)
+        }
+        applyFilter()
+        if seq == importSeq { importRunning = false }
+        publishImport(done: done, total: total,
+                      finished: seq == importSeq && !importCancel)
+    }
+
     func startBackfill() {
-        backfillSeq += 1
-        let seq = backfillSeq
+        importSeq += 1
+        let seq = importSeq
+        importCancel = false
         guard LastFM.shared.isEnabled else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)   // let the scan settle
+            guard seq == self.importSeq else { return }
+            self.importRunning = true
+            self.publishImport(done: 0, total: 0, finished: false)
             await LastFM.shared.login()
-            var fetched = 0
-            var fails = 0
-            while seq == self.backfillSeq {
-                var didWork = false
-                for i in self.lib.tracks.indices
-                where !self.lib.tracks[i].artist.isEmpty
-                    && FmCache.shared.needsLookup(artist: self.lib.tracks[i].artist,
-                                                  title: self.lib.tracks[i].title) {
-                    didWork = true
-                    if let info = await LastFM.shared.info(for: self.lib.tracks[i]) {
-                        self.lib.updateStats(at: i, playcount: info.playcount, loved: info.loved)
-                        fails = 0
-                    } else {
-                        fails += 1
-                    }
-                    fetched += 1
-                    if fetched % 15 == 0 { self.applyFilter() }
-                    break
-                }
-                if !didWork {
-                    self.applyFilter()
-                    return
-                }
-                // rate-limit / network trouble → back off instead of hammering
-                if fails >= 3 {
-                    try? await Task.sleep(nanoseconds: 20_000_000_000)
-                    fails = 0
-                }
-                try? await Task.sleep(nanoseconds: 1_100_000_000)
-            }
+            await self.runImport(seq: seq, force: false)
         }
     }
-    private var backfillSeq = 0
-
     func scrobbleIfNeeded() {
         guard let t = currentTrack(), let start = playStartTime,
               t.duration > 0, playedSeconds >= min(t.duration * 0.5, 240),

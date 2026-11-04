@@ -100,9 +100,9 @@ final class LastFM {
     }
 
     // playcount + loved state for one track
-    func info(for track: Track) async -> (playcount: Int, loved: Bool)? {
+    func info(for track: Track, force: Bool = false) async -> (playcount: Int, loved: Bool)? {
         guard isEnabled else { return nil }
-        if let c = FmCache.shared.get(artist: track.artist, title: track.title),
+        if !force, let c = FmCache.shared.get(artist: track.artist, title: track.title),
            let pc = c.playcount {
             return (pc, c.loved)
         }

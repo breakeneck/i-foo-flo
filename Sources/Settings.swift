@@ -14,13 +14,40 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
     private var userField: NSTextField!
     private var passField: NSSecureTextField!
     private var statusLabel: NSTextField!
+    private var importBar: NSProgressIndicator!
+    private var importLabel: NSTextField!
+    private var importCancelBtn: NSButton!
+    private var importObs: NSObjectProtocol?
 
     func show(tab: Int = 0) {
         if window == nil { build() }
+        if importObs == nil {
+            importObs = NotificationCenter.default.addObserver(
+                forName: AppDelegate.fmImportProgress, object: nil, queue: .main) { [weak self] note in
+                Task { @MainActor in self?.importProgress(note.userInfo ?? [:]) }
+            }
+        }
         (window!.contentView as? NSTabView)?.selectTabViewItem(at: tab)
         reloadDirs()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func importProgress(_ info: [AnyHashable: Any]) {
+        let done = info["done"] as? Int ?? 0
+        let total = info["total"] as? Int ?? 0
+        let finished = info["finished"] as? Bool ?? false
+        let cancelled = info["cancelled"] as? Bool ?? false
+        importBar.isHidden = total == 0 || finished || cancelled
+        importCancelBtn.isEnabled = !finished && !cancelled && total > 0
+        if cancelled {
+            importLabel.stringValue = "імпорт скасовано (\(done) з \(total))"
+        } else if finished {
+            importLabel.stringValue = "✓ імпортовано \(done) треків"
+        } else if total > 0 {
+            importBar.doubleValue = Double(done) * 100 / Double(total)
+            importLabel.stringValue = "\(done) / \(total)  (\(Int(Double(done) * 100 / Double(total)))%)"
+        }
     }
 
     private func build() {
@@ -123,12 +150,26 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
         testBtn.bezelStyle = .rounded
         let fmSave = NSButton(title: "Зберегти", target: self, action: #selector(saveLastfm))
         fmSave.bezelStyle = .rounded
-        let importBtn = NSButton(title: "Імпортувати лайки", target: self, action: #selector(importLoved))
+        let importBtn = NSButton(title: "Імпорт статистики (плейкаунти + лайки)",
+                                 target: self, action: #selector(importStats))
         importBtn.bezelStyle = .rounded
+        importCancelBtn = NSButton(title: "Скасувати", target: self, action: #selector(cancelImport))
+        importCancelBtn.bezelStyle = .rounded
+        importCancelBtn.isEnabled = false
+        importBar = NSProgressIndicator()
+        importBar.style = .bar
+        importBar.isIndeterminate = false
+        importBar.maxValue = 100
+        importBar.translatesAutoresizingMaskIntoConstraints = false
+        importBar.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        importBar.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        importLabel = NSTextField(labelWithString: "")
+        importLabel.font = .systemFont(ofSize: 11)
         let grid = NSGridView(views: [
             [NSTextField(labelWithString: "User:"), userField],
             [NSTextField(labelWithString: "Password:"), passField],
-            [NSView(), NSStackView(views: [testBtn, fmSave, importBtn, statusLabel])],
+            [NSView(), NSStackView(views: [testBtn, fmSave, statusLabel])],
+            [NSView(), NSStackView(views: [importBtn, importCancelBtn, importBar, importLabel])],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -210,6 +251,18 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let ok = await LastFM.shared.login()
             statusLabel.stringValue = ok ? "✓ вхід успішний" : "✗ не вдалось (перевір логін/пароль)"
         }
+    }
+
+    @objc private func importStats() {
+        saveLastfm()
+        statusLabel.stringValue = ""
+        importLabel.stringValue = "вхід…"
+        AppDelegate.shared?.startFullImport()
+    }
+
+    @objc private func cancelImport() {
+        AppDelegate.shared?.importCancel = true
+        importLabel.stringValue = "скасовую…"
     }
 
     @objc private func importLoved() {

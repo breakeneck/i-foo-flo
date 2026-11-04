@@ -1236,8 +1236,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             let tf = (tv.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
                 let t = NSTextField(labelWithString: "")
                 t.identifier = id
-                t.font = .systemFont(ofSize: 11, weight: .semibold)
-                t.textColor = .secondaryLabelColor
+                t.font = .systemFont(ofSize: 12, weight: .bold)
+                t.textColor = .labelColor
+                t.alignment = .center
                 t.lineBreakMode = .byTruncatingMiddle
                 return t
             }()

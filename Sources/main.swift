@@ -48,7 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var timeLabel: NSTextField!
     var playButton: NSButton!
     var loveButton: NSButton!
-    var shuffleButton: NSButton!
+    var orderPopup: NSPopUpButton!
+    var stopPopup: NSPopUpButton!
     var lyricsButton: NSButton!
     var sshButton: NSButton!
     var lyricsText: NSTextView!
@@ -309,10 +310,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         loveButton = NSButton(title: "♡", target: self, action: #selector(toggleLove))
         loveButton.bezelStyle = .rounded
         loveButton.toolTip = "Лайк на Last.fm"
-        shuffleButton = NSButton(title: "🔀", target: self, action: #selector(toggleShuffle))
-        shuffleButton.bezelStyle = .rounded
-        shuffleButton.toolTip = "Рандомний порядок (як Rnd у Qt-версії)"
-        updateShuffleButton()
+        // playback order + stop-after-current dropdowns (bottom row, right side)
+        orderPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        orderPopup.addItems(withTitles: ["▶ В порядку", "🔀 Рандом"])
+        orderPopup.target = self
+        orderPopup.action = #selector(orderChanged)
+        orderPopup.toolTip = "Порядок відтворення"
+        orderPopup.selectItem(at: Config.shared.shuffle ? 1 : 0)
+        stopPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        stopPopup.addItems(withTitles: ["⏭ Грати далі", "⏹ Стоп після поточного", "⏹ Стоп після кожного"])
+        stopPopup.target = self
+        stopPopup.action = #selector(stopModeChanged)
+        stopPopup.toolTip = "Stop After Current (як у Qt-версії: один раз або завжди)"
+        stopPopup.selectItem(at: ["off", "once", "always"].firstIndex(of: Config.shared.stopAfterMode) ?? 0)
         lyricsButton = NSButton(title: "📜", target: self, action: #selector(toggleLyrics))
         lyricsButton.bezelStyle = .rounded
         lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
@@ -329,10 +339,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         nowLabel.lineBreakMode = .byTruncatingMiddle
         nowLabel.font = .systemFont(ofSize: 11)
 
-        let stack = NSStackView(views: [prev, playButton, next, shuffleButton, loveButton, seekSlider,
-                                        timeLabel, volSlider, lyricsButton])
+        let stack = NSStackView(views: [prev, playButton, next, loveButton, seekSlider,
+                                        timeLabel, volSlider, lyricsButton,
+                                        NSView(), orderPopup, stopPopup])
         stack.orientation = .horizontal
         stack.spacing = 8
+        stack.setHuggingPriority(.defaultLow, for: .horizontal)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
@@ -395,8 +407,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }
         player.onItemEnd = { [weak self] in
+            print("onItemEnd fired")
             self?.scrobbleIfNeeded()
-            self?.nextTrack()
+            guard let self else { return }
+            let mode = Config.shared.stopAfterMode
+            if mode == "once" || mode == "always" {
+                if mode == "once" {
+                    Config.shared.stopAfterMode = "off"
+                    self.stopPopup.selectItem(at: 0)
+                }
+                self.player.av.pause()
+                self.player.seek(0)
+                self.playButton.title = "▶"
+                self.seekSlider.doubleValue = 0
+                if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+                    info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                }
+                return
+            }
+            self.nextTrack()
         }
     }
 
@@ -453,12 +483,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc func nextTrack() { playRelative(1) }
     @objc func prevTrack() { playRelative(-1) }
 
-    @objc func toggleShuffle() {
-        Config.shared.shuffle.toggle()
-        updateShuffleButton()
+    @objc func orderChanged() {
+        Config.shared.shuffle = orderPopup.indexOfSelectedItem == 1
     }
-    func updateShuffleButton() {
-        shuffleButton?.alphaValue = Config.shared.shuffle ? 1.0 : 0.35
+
+    @objc func stopModeChanged() {
+        Config.shared.stopAfterMode = ["off", "once", "always"][stopPopup.indexOfSelectedItem]
     }
 
     func playRelative(_ delta: Int) {

@@ -55,6 +55,11 @@ final class Config {
         get { d.bool(forKey: "cfg.rndOrder") }
         set { d.set(newValue, forKey: "cfg.rndOrder") }
     }
+    /// "off" | "once" (stop after current, then clear) | "always" (stop after every track)
+    var stopAfterMode: String {
+        get { d.string(forKey: "cfg.stop_after_mode") ?? "off" }
+        set { d.set(newValue, forKey: "cfg.stop_after_mode") }
+    }
 }
 
 // MARK: - MD5 helper (Last.fm api_sig)

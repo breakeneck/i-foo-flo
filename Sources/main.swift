@@ -60,19 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
     var treeRoots: [FolderNode] = []
-    var folderFilter: String? {   // dir path set by tree click; nil = all
-        didSet {
-            guard isReady, folderChip != nil else { return }
-            if let f = folderFilter {
-                folderChip.title = "📁 фільтр: \((f as NSString).lastPathComponent) — клік, щоб скинути"
-                folderChip.isHidden = false
-            } else {
-                folderChip.isHidden = true
-            }
-        }
-    }
+    var folderFilter: String?   // dir path set by tree click; nil = all (tree itself shows which)
     var isReady = false
-    var folderChip: NSButton!
     var currentPlayingPath: String?
     var currentPlayingKey: String?
     var lyricsVisible = false
@@ -344,12 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsSplit.translatesAutoresizingMaskIntoConstraints = false
         lyricsSplit.addArrangedSubview(treeScroll)
         // playlist pane: search on top, table below — lives inside the middle column
-        folderChip = NSButton(title: "", target: self, action: #selector(clearFolderFilter))
-        folderChip.bezelStyle = .inline
-        folderChip.font = .systemFont(ofSize: 11)
-        folderChip.isHidden = true
-        folderChip.toolTip = "Клік — прибрати фільтр по директорії"
-        let playlistPane = NSStackView(views: [search, folderChip, scroll])
+        let playlistPane = NSStackView(views: [search, scroll])
         playlistPane.orientation = .vertical
         playlistPane.alignment = .leading
         playlistPane.spacing = 6

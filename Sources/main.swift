@@ -719,14 +719,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         label.translatesAutoresizingMaskIntoConstraints = false
         rv.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: rv.leadingAnchor, constant: 8),
+            label.leadingAnchor.constraint(equalTo: rv.leadingAnchor, constant: 6),
             label.centerYAnchor.constraint(equalTo: rv.centerYAnchor),
         ])
         return rv
     }
 
     func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .header = rows[row] { return 24 }
+        if case .header = rows[row] { return 18 }
         return 20
     }
 

@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsButton: NSButton!
     var sshButton: NSButton!
     var lyricsText: NSTextView!
+    var lyricsHeader: NSTextField!
     var lyricsScroll: NSScrollView!
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
@@ -238,6 +239,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         lyricsScroll = lscroll
 
+        // editable search-target header: "Artist — Title", Enter = re-query
+        lyricsHeader = NSTextField(string: "")
+        lyricsHeader.font = .systemFont(ofSize: 12, weight: .semibold)
+        lyricsHeader.placeholderString = "Артист — Трек (Enter = шукати)"
+        lyricsHeader.target = self
+        lyricsHeader.action = #selector(lyricsQueryEdited)
+
         // folder tree (left pane), like the Qt treeView
         outline = NSOutlineView()
         let tcol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
@@ -275,11 +283,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         scroll.setContentCompressionResistancePriority(.required, for: .vertical)
         search.setContentHuggingPriority(.required, for: .vertical)
         lyricsSplit.addArrangedSubview(playlistPane)
-        lyricsSplit.addArrangedSubview(lscroll)
-        for v in [treeScroll, lscroll] {
-            v.setContentHuggingPriority(.defaultLow, for: .vertical)
-            v.setContentCompressionResistancePriority(.required, for: .vertical)
-        }
+        // lyrics pane: editable target header on top, text below
+        let lyricsPane = NSStackView(views: [lyricsHeader, lscroll])
+        lyricsPane.orientation = .vertical
+        lyricsPane.alignment = .leading
+        lyricsPane.spacing = 4
+        lyricsHeader.widthAnchor.constraint(equalTo: lyricsPane.widthAnchor).isActive = true
+        lscroll.widthAnchor.constraint(equalTo: lyricsPane.widthAnchor).isActive = true
+        lscroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        lscroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        lscroll.setContentCompressionResistancePriority(.required, for: .vertical)
+        lyricsHeader.setContentHuggingPriority(.required, for: .vertical)
+        lyricsSplit.addArrangedSubview(lyricsPane)
+        treeScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        treeScroll.setContentCompressionResistancePriority(.required, for: .vertical)
         content.addSubview(lyricsSplit)
 
         // transport
@@ -353,6 +370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             guard let self, ev.window == self.window else { return ev }
+            // typing in any text field (search, lyrics header): let keys through
+            if self.window.firstResponder is NSText { return ev }
             if ev.keyCode == 36, let fi = self.filteredIndex(forRow: self.table.selectedRow) {
                 self.playRow(fi); return nil
             }
@@ -553,14 +572,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let seq = lyricsReqSeq
         currentLyrics = nil
         lyricsText.string = Config.shared.lyricsEnabled ? "…" : ""
+        lyricsHeader.stringValue = t.artist.isEmpty ? t.title : "\(t.artist) — \(t.title)"
         guard !t.artist.isEmpty else { return }
         let dur = player.duration > 0 ? player.duration : t.duration
         Task {
-            let r = await Lyrics.fetch(artist: t.artist, title: cleanQueryTitle(t.title),
-                                       album: t.album, duration: dur)
+            let r = await resolveLyrics(artist: t.artist, title: cleanQueryTitle(t.title),
+                                        album: t.album, duration: dur, embedded: t.lyrics)
             guard seq == lyricsReqSeq else { return }
             currentLyrics = r
             print("lyrics: \(r?.source ?? "not found") for [\(t.artist)] / [\(t.title)]")
+            renderLyrics(r)
+        }
+    }
+
+    /// resolution chain: tag-embedded lyrics → local cache → network (then cached).
+    /// Synced always wins over plain for display.
+    func resolveLyrics(artist: String, title: String, album: String,
+                       duration: TimeInterval, embedded: String? = nil) async -> LyricsResult? {
+        if let e = embedded, !e.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let synced = Lyrics.parseLRC(e)
+            if !synced.isEmpty { return LyricsResult(synced: synced, plain: nil, source: "тег файлу") }
+            return LyricsResult(synced: [], plain: e, source: "тег файлу")
+        }
+        if let c = LyricsCache.shared.get(artist: artist, title: title) {
+            let synced = Lyrics.parseLRC(c.synced)
+            return LyricsResult(synced: synced,
+                                plain: c.plain.isEmpty ? nil : c.plain,
+                                source: c.source.isEmpty ? "кеш" : "\(c.source) (кеш)")
+        }
+        if let r = await Lyrics.fetch(artist: artist, title: title, album: album,
+                                      duration: duration) {
+            let lrc = r.synced.map { line -> String in
+                let m = Int(line.time) / 60, s = line.time - Double(m * 60)
+                return String(format: "[%02d:%04.1f] %@", m, s, line.text)
+            }.joined(separator: "\n")
+            LyricsCache.shared.set(artist: artist, title: title, synced: lrc,
+                                   plain: r.plain ?? "", source: r.source)
+            return r
+        }
+        return nil
+    }
+
+    @objc func lyricsQueryEdited() {
+        let s = lyricsHeader.stringValue
+        let parts = s.contains("—") ? s.components(separatedBy: "—")
+                                    : s.components(separatedBy: " - ")
+        let a = parts.first?.trimmingCharacters(in: .whitespaces) ?? ""
+        let b = parts.count > 1
+            ? parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespaces) : ""
+        guard !a.isEmpty, !b.isEmpty else { return }
+        lyricsReqSeq += 1
+        let seq = lyricsReqSeq
+        currentLyrics = nil
+        lyricsText.string = "…"
+        window.makeFirstResponder(lyricsText)
+        Task {
+            let r = await resolveLyrics(artist: a, title: b, album: "",
+                                        duration: player.duration)
+            guard seq == lyricsReqSeq else { return }
+            currentLyrics = r
             renderLyrics(r)
         }
     }

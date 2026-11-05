@@ -651,7 +651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         playButton.title = "⏸"
         updateNowPlaying(t)
         startLyrics(for: t)
-        refreshLastFM(for: t, row: row)
+        refreshLastFM(for: t)
     }
 
     func remoteHost(for path: String) -> String? {
@@ -855,19 +855,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         LastFM.shared.scrobble(artist: t.artist, title: t.title, album: t.album, start: start)
     }
 
-    func refreshLastFM(for t: Track, row: Int) {
+    func refreshLastFM(for t: Track) {
         loveButton.title = t.loved == true ? "♥" : "♡"
         loveButton.isEnabled = LastFM.shared.isEnabled && !t.artist.isEmpty
         guard LastFM.shared.isEnabled, !t.artist.isEmpty else { return }
         Task {
             if let info = await LastFM.shared.info(for: t) {
+                // re-locate the track by identity: `filtered` may have been
+                // rebuilt (search/filter/rescan) while the fetch was in flight
+                var matched = -1
                 for i in self.filtered.indices
                 where self.filtered[i].url == t.url && self.filtered[i].remotePath == t.remotePath {
                     self.filtered[i].playcount = info.playcount
                     self.filtered[i].loved = info.loved
+                    matched = i
                 }
                 self.loveButton.title = info.loved ? "♥" : "♡"
-                if row == self.queueIndex { self.updateNowPlaying(self.filtered[row]) }
+                if matched >= 0, matched == self.queueIndex { self.updateNowPlaying(self.filtered[matched]) }
                 self.table.reloadData()
             }
         }
@@ -875,17 +879,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func toggleLove() {
         guard let t = currentTrack(), queueIndex >= 0 else { return }
-        loveTrack(t, row: queueIndex)
+        loveTrack(t)
     }
 
-    func loveTrack(_ t: Track, row: Int) {
+    func loveTrack(_ t: Track) {
         let target = !(t.loved ?? false)
         LastFM.shared.setLoved(t, loved: target) { [weak self] ok in
-            guard ok, let self, row < self.filtered.count else { return }
-            self.filtered[row].loved = target
-            if row == self.queueIndex {
+            guard let self, ok else { return }
+            var matched = -1
+            for i in self.filtered.indices
+            where self.filtered[i].url == t.url && self.filtered[i].remotePath == t.remotePath {
+                self.filtered[i].loved = target
+                matched = i
+            }
+            if matched >= 0, matched == self.queueIndex {
                 self.loveButton.title = target ? "♥" : "♡"
-                self.updateNowPlaying(self.filtered[row])
+                self.updateNowPlaying(self.filtered[matched])
             }
             self.table.reloadData()
         }
@@ -981,7 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func loveFromMenu() {
         guard let t = ctxTrack(), let row = ctxTrackRow() else { return }
-        loveTrack(t, row: row)
+        loveTrack(t)
     }
 
     // MARK: lyrics

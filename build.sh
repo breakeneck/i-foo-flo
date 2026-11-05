@@ -45,3 +45,17 @@ EOF
 codesign --force --sign 7B228DEF19A88C43B09524F85DA99C9AB55E16EC "$APP" 2>/dev/null \
   || codesign --force --sign - "$APP" 2>/dev/null || true
 echo "built: $(pwd)/$APP"
+
+# Install to ~/Applications — the ONE canonical instance. Unregister the
+# repo build copy from LaunchServices so Launchpad/Dock never show a second tile.
+INSTALL_DIR="$HOME/Applications"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+mkdir -p "$INSTALL_DIR"
+pkill -x FooBarSwift 2>/dev/null || true
+rm -rf "$INSTALL_DIR/$APP"
+cp -R "$APP" "$INSTALL_DIR/"
+"$LSREGISTER" -u "$(pwd)/$APP" 2>/dev/null || true
+"$LSREGISTER" -f "$INSTALL_DIR/$APP" 2>/dev/null || true
+echo "installed: $INSTALL_DIR/$APP"
+open "$INSTALL_DIR/$APP"
+echo "launched."

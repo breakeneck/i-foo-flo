@@ -100,6 +100,47 @@ final class Library {
         }
     }
 
+    // MARK: folder rescan (tree context menu)
+
+    /// rescan only `path` (a folder inside one of the library roots) and merge
+    /// the fresh result back, replacing whatever we had under that folder
+    func rescanFolder(path: String) {
+        scanSeq += 1
+        let seq = scanSeq
+        print("rescan folder: \(path)")
+        Task {
+            var fresh: [Track] = []
+            for dir in dirs {
+                if let r = parseSftp(dir) {
+                    if path == r.path || path.hasPrefix(r.path + "/") {
+                        fresh = await scanRemote(host: r.host, root: path)
+                    } else if r.path.hasPrefix(path + "/") {
+                        fresh.append(contentsOf: await scanRemote(host: r.host, root: r.path))
+                    }
+                } else {
+                    let exp = (dir as NSString).expandingTildeInPath
+                    if path == exp || path.hasPrefix(exp + "/") {
+                        fresh = await scanLocal(path)
+                    } else if exp.hasPrefix(path + "/") {
+                        fresh.append(contentsOf: await scanLocal(exp))
+                    }
+                }
+            }
+            guard seq == scanSeq else { return }
+            let prefix = path + "/"
+            var kept = tracks.filter { !(($0.dirPath) == path || $0.dirPath.hasPrefix(prefix)) }
+            kept.append(contentsOf: fresh)
+            tracks = kept.sorted {
+                let c = $0.folder.localizedCaseInsensitiveCompare($1.folder)
+                if c != .orderedSame { return c == .orderedAscending }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+            hydrateStatsFromCache()
+            print("rescan folder done: \(path), \(fresh.count) fresh tracks")
+            onUpdated?()
+        }
+    }
+
     // MARK: local
 
     private func scanLocal(_ dir: String) async -> [Track] {

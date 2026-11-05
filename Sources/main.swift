@@ -185,6 +185,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func openSettings() { SettingsWindow.shared.show(tab: 0) }
     @objc func rescan() { lib.scan() }
+
+    var treeMenu: NSMenu?
+    var treeRescanItem: NSMenuItem?
+    var treeMenuNode: FolderNode?
+
+    @objc func rescanTreeFolder() {
+        if let n = treeMenuNode, !treeRoots.contains(where: { $0.path == n.path }) {
+            lib.rescanFolder(path: n.path)
+        } else {
+            lib.scan()
+        }
+    }
     @objc func toggleLyrics() { setLyricsVisible(!lyricsVisible) }
 
     var lyricsMenuItem: NSMenuItem?
@@ -270,6 +282,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             c.title = name; c.width = w
             table.addTableColumn(c)
         }
+        // persist user-dragged column order + widths (must be set after
+        // columns exist with identifiers; restores on next launch)
+        table.autosaveName = "PlaylistColumns"
+        table.autosaveTableColumns = true
         let menu = NSMenu()
         menu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "")
         menu.addItem(withTitle: "Перепід'єднати SSH", action: #selector(sshReconnect), keyEquivalent: "")
@@ -292,7 +308,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         scroll.autohidesScrollers = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsColumnResizing = true
-        table.autosaveName = "PlaylistColumns"   // widths + order survive restarts
 
         lyricsText = NSTextView()
         lyricsText.isEditable = false
@@ -324,8 +339,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         outline.rowSizeStyle = .small
         let treeMenu = NSMenu()
         treeMenu.addItem(withTitle: "Показати всі треки", action: #selector(clearFolderFilter), keyEquivalent: "")
-        treeMenu.addItem(withTitle: "Рескан бібліотеки", action: #selector(rescan), keyEquivalent: "")
+        treeRescanItem = treeMenu.addItem(withTitle: "Рескан бібліотеки",
+                                          action: #selector(rescanTreeFolder), keyEquivalent: "")
         for it in treeMenu.items { it.target = self }
+        treeMenu.delegate = self
+        self.treeMenu = treeMenu
         outline.menu = treeMenu
         let treeScroll = NSScrollView()
         treeScroll.documentView = outline
@@ -411,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         randomButton = NSButton(title: "🎲", target: self, action: #selector(jumpToRandom))
         randomButton.bezelStyle = .rounded
         randomButton.toolTip = "Перейти до випадкового треку з поточного списку"
-        lyricsButton = NSButton(title: "📜", target: self, action: #selector(toggleLyrics))
+        lyricsButton = NSButton(title: "🗒️", target: self, action: #selector(toggleLyrics))
         lyricsButton.bezelStyle = .rounded
         lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
 
@@ -880,6 +898,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var ctxLoveItem: NSMenuItem?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === treeMenu {
+            let row = outline.clickedRow
+            treeMenuNode = row >= 0 ? outline.item(atRow: row) as? FolderNode : nil
+            if let n = treeMenuNode, !treeRoots.contains(where: { $0.path == n.path }) {
+                treeRescanItem?.title = "Рескан папки: \(n.name)"
+            } else {
+                treeRescanItem?.title = "Рескан бібліотеки"
+            }
+            return
+        }
         let has = ctxTrack() != nil
         ctxEditItem?.isEnabled = has
         ctxPropsItem?.isEnabled = has

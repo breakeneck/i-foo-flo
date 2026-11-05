@@ -297,6 +297,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                                     action: #selector(showProperties), keyEquivalent: "")
         ctxLoveItem = menu.addItem(withTitle: "Лайкнути / зняти лайк",
                                    action: #selector(loveFromMenu), keyEquivalent: "")
+        menu.addItem(.separator())
+        ctxDeleteItem = menu.addItem(withTitle: "Видалити файл…",
+                                     action: #selector(deleteFileFromMenu), keyEquivalent: "")
         for it in menu.items { it.target = self }
         menu.delegate = self
         table.menu = menu
@@ -341,6 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         treeMenu.addItem(withTitle: "Показати всі треки", action: #selector(clearFolderFilter), keyEquivalent: "")
         treeRescanItem = treeMenu.addItem(withTitle: "Рескан бібліотеки",
                                           action: #selector(rescanTreeFolder), keyEquivalent: "")
+        treeDeleteItem = treeMenu.addItem(withTitle: "Видалити папку…",
+                                          action: #selector(deleteFolderFromTree), keyEquivalent: "")
         for it in treeMenu.items { it.target = self }
         treeMenu.delegate = self
         self.treeMenu = treeMenu
@@ -905,6 +910,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var ctxEditItem: NSMenuItem?
     var ctxPropsItem: NSMenuItem?
     var ctxLoveItem: NSMenuItem?
+    var ctxDeleteItem: NSMenuItem?
+    var treeDeleteItem: NSMenuItem?
+
+    /// single-quote a path for remote shell
+    func shellq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    /// host of a remote path (nil = local file)
+    func host(for remotePath: String?) -> String? {
+        guard let rp = remotePath else { return nil }
+        for d in lib.dirs {
+            if let r = parseSftp(d), rp == r.path || rp.hasPrefix(r.path + "/") { return r.host }
+        }
+        return nil
+    }
+
+    func confirmDelete(_ text: String) -> Bool {
+        let a = NSAlert()
+        a.messageText = "Видалити?"
+        a.informativeText = text
+        a.addButton(withTitle: "Видалити")
+        a.addButton(withTitle: "Скасувати")
+        a.alertStyle = .warning
+        return a.runModal() == .alertFirstButtonReturn
+    }
+
+    func errorAlert(_ text: String) {
+        let a = NSAlert()
+        a.messageText = "Не вдалось видалити"
+        a.informativeText = text
+        a.runModal()
+    }
+
+    @objc func deleteFileFromMenu() {
+        guard let t = ctxTrack() else { return }
+        let path = t.fullPath
+        let dir = t.dirPath
+        guard confirmDelete("\(t.artist) — \(t.title)\n\(path)") else { return }
+        // stop playback if we are about to delete what's playing
+        if currentPlayingKey == trackKey(t), player.isPlaying { player.toggle() }
+        let h = host(for: t.remotePath)
+        Task {
+            do {
+                if let h { _ = try await Ssh.run(host: h, command: "rm -f -- \(shellq(path))") }
+                else { try FileManager.default.removeItem(atPath: path) }
+                lib.rescanFolder(path: dir)   // instant refresh of list + tree
+            } catch { errorAlert("\(path)\n\(error.localizedDescription)") }
+        }
+    }
+
+    @objc func deleteFolderFromTree() {
+        guard let n = treeMenuNode, !treeRoots.contains(where: { $0.path == n.path }) else { return }
+        let prefix = n.path + "/"
+        let count = lib.tracks.filter { $0.dirPath == n.path || $0.dirPath.hasPrefix(prefix) }.count
+        guard confirmDelete("папку «\(n.name)» і весь вміст (\(count) треків)\n\(n.path)") else { return }
+        if let cur = currentTrack(), cur.dirPath == n.path || cur.dirPath.hasPrefix(prefix),
+           player.isPlaying { player.toggle() }
+        let h = host(for: lib.tracks.first(where: { $0.dirPath == n.path || $0.dirPath.hasPrefix(prefix) })?.remotePath)
+            ?? lib.dirs.compactMap { parseSftp($0) }.first { n.path == $0.path || n.path.hasPrefix($0.path + "/") }?.host
+        let parent = (n.path as NSString).deletingLastPathComponent
+        Task {
+            do {
+                if let h { _ = try await Ssh.run(host: h, command: "rm -rf -- \(shellq(n.path))") }
+                else { try FileManager.default.removeItem(atPath: n.path) }
+                lib.rescanFolder(path: parent)   // instant refresh of list + tree
+            } catch { errorAlert("\(n.path)\n\(error.localizedDescription)") }
+        }
+    }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === treeMenu {
@@ -912,8 +984,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             treeMenuNode = row >= 0 ? outline.item(atRow: row) as? FolderNode : nil
             if let n = treeMenuNode, !treeRoots.contains(where: { $0.path == n.path }) {
                 treeRescanItem?.title = "Рескан папки: \(n.name)"
+                treeDeleteItem?.isEnabled = true
             } else {
                 treeRescanItem?.title = "Рескан бібліотеки"
+                treeDeleteItem?.isEnabled = false   // library root: not deletable
             }
             return
         }
@@ -921,6 +995,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         ctxEditItem?.isEnabled = has
         ctxPropsItem?.isEnabled = has
         ctxLoveItem?.isEnabled = has && LastFM.shared.isEnabled
+        ctxDeleteItem?.isEnabled = has
     }
 
     func ctxTrack() -> Track? {

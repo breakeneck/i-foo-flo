@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var lyricsText: NSTextView!
     var lyricsHeader: NSTextField!
     var lyricsScroll: NSScrollView!
+    var playlistScroll: NSScrollView!
     var lyricsPane: NSStackView?
     var lyricsSplit: NSSplitView!
     var outline: NSOutlineView!
@@ -130,6 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     func applicationWillTerminate(_ n: Notification) {
         Config.shared.volume = player.volume
         Config.shared.searchText = search.stringValue
+        Config.shared.folderFilterPath = folderFilter ?? ""
+        Config.shared.treeFilterText = treeSearch.stringValue
+        Config.shared.playlistScrollY = Double(playlistScroll?.contentView.bounds.origin.y ?? 0)
+        // remember which row was selected (not necessarily playing)
+        if let t = track(forRow: table.selectedRow) { Config.shared.selectedTrackKey = trackKey(t) }
+        // remember expanded tree nodes
+        var expanded: [String] = []
+        func walk(_ n: FolderNode) {
+            if outline.isItemExpanded(n) { expanded.append(n.path) }
+            for c in n.sortedChildren { walk(c) }
+        }
+        for r in treeRoots { walk(r) }
+        Config.shared.treeExpanded = expanded
         if lyricsSplit != nil {
             Config.shared.splitPos0 = dividerPos(lyricsSplit, 0)
             if lyricsVisible {
@@ -205,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsVisible = visible
         lyricsScroll?.isHidden = !visible
         lyricsPane?.isHidden = !visible
+        lyricsButton?.state = visible ? .on : .off
         lyricsMenuItem?.state = visible ? .on : .off
         Config.shared.lyricsEnabled = visible
         if let split = lyricsSplit {
@@ -309,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
+        playlistScroll = scroll
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsColumnResizing = true
 
@@ -436,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         randomButton.toolTip = "Перейти до випадкового треку з поточного списку"
         lyricsButton = NSButton(title: "🗒️", target: self, action: #selector(toggleLyrics))
         lyricsButton.bezelStyle = .rounded
+        lyricsButton.setButtonType(.pushOnPushOff)   // stays visually pressed while pane is open
         lyricsButton.toolTip = "Тексти пісень (Cmd+L)"
 
         seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: self, action: #selector(seeked))
@@ -717,19 +734,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func restoreSession() {
-        guard !sessionRestored else { return }
+        // wait for real data: scan start fires onUpdated with an empty list
+        guard !sessionRestored, !filtered.isEmpty else { return }
         sessionRestored = true
-        let key = Config.shared.lastTrackKey
-        guard !key.isEmpty, let fi = filtered.firstIndex(where: { trackKey($0) == key }) else { return }
-        queueIndex = fi
-        if let r = rows.firstIndex(where: { if case .track(let i) = $0 { return i == fi }; return false }) {
-            table.selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false)
+        let c = Config.shared
+        // folder filter that was active
+        if !c.folderFilterPath.isEmpty {
+            folderFilter = c.folderFilterPath
+            applyFilter()
         }
-        let pos = Config.shared.lastTrackPos
-        let dur = filtered[fi].duration
-        if pos > 0, dur > 0 {
-            seekSlider.doubleValue = pos / dur
-            timeLabel.stringValue = "\(fmt(pos)) / \(fmt(dur))"
+        // track that was playing (queue slot + seek position)
+        let key = c.lastTrackKey
+        if !key.isEmpty, let fi = filtered.firstIndex(where: { trackKey($0) == key }) {
+            queueIndex = fi
+            let pos = c.lastTrackPos
+            let dur = filtered[fi].duration
+            if pos > 0, dur > 0 {
+                seekSlider.doubleValue = pos / dur
+                timeLabel.stringValue = "\(fmt(pos)) / \(fmt(dur))"
+            }
+        }
+        // selected row (may differ from the playing one)
+        let selKey = c.selectedTrackKey.isEmpty ? c.lastTrackKey : c.selectedTrackKey
+        // scroll, selection and tree state must land after every rebuild
+        // in this cycle (scan fires onUpdated twice: partial + sorted)
+        let savedY = c.playlistScrollY
+        let ff = c.folderFilterPath
+        let tf = c.treeFilterText
+        let exp = c.treeExpanded
+        DispatchQueue.main.async {
+            // tree first: its selection handler re-filters the table,
+            // so the table selection must happen after it
+            for p in exp {
+                for n in self.treeChain(to: p) { self.outline.expandItem(n) }
+            }
+            if !ff.isEmpty, let n = self.treeChain(to: ff).last {
+                let row = self.outline.row(forItem: n)
+                if row >= 0 {
+                    self.outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    self.outline.scrollRowToVisible(row)
+                }
+            }
+            var selRow = -1
+            if !selKey.isEmpty, let sfi = self.filtered.firstIndex(where: { self.trackKey($0) == selKey }),
+               let r = self.row(forFilteredIndex: sfi) {
+                selRow = r
+                self.table.selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false)
+            }
+            if savedY > 0 {
+                self.playlistScroll.contentView.scroll(to: NSPoint(x: 0, y: savedY))
+                self.playlistScroll.reflectScrolledClipView(self.playlistScroll.contentView)
+            } else if selRow >= 0 {
+                self.table.scrollRowToVisible(selRow)
+            }
+            if !tf.isEmpty {
+                self.treeSearch.stringValue = tf
+                self.treeFilterChanged()
+            }
         }
     }
 
@@ -1504,13 +1565,8 @@ extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
         applyFilter()
     }
 
-    /// expand + select the tree node of the currently playing track
-    func locateCurrentFolder() {
-        guard let path = currentPlayingPath else { return }
-        if !treeQuery.isEmpty {
-            treeSearch.stringValue = ""
-            treeFilterChanged()
-        }
+    /// find the node chain from a root down to the node with this path
+    func treeChain(to path: String) -> [FolderNode] {
         var chain: [FolderNode] = []
         func walk(_ node: FolderNode, _ acc: [FolderNode]) -> Bool {
             let here = acc + [node]
@@ -1519,6 +1575,17 @@ extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
             return false
         }
         for r in treeRoots where walk(r, []) { break }
+        return chain
+    }
+
+    /// expand + select the tree node of the currently playing track
+    func locateCurrentFolder() {
+        guard let path = currentPlayingPath else { return }
+        if !treeQuery.isEmpty {
+            treeSearch.stringValue = ""
+            treeFilterChanged()
+        }
+        let chain = treeChain(to: path)
         guard !chain.isEmpty else { return }
         for n in chain.dropLast() { outline.expandItem(n) }
         if let last = chain.last {

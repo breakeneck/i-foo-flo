@@ -90,6 +90,26 @@ final class Config {
         get { d.object(forKey: "cfg.last_pos") as? Double ?? 0 }
         set { d.set(newValue, forKey: "cfg.last_pos") }
     }
+    var folderFilterPath: String {
+        get { d.string(forKey: "cfg.folder_filter") ?? "" }
+        set { d.set(newValue, forKey: "cfg.folder_filter") }
+    }
+    var treeFilterText: String {
+        get { d.string(forKey: "cfg.tree_filter") ?? "" }
+        set { d.set(newValue, forKey: "cfg.tree_filter") }
+    }
+    var treeExpanded: [String] {
+        get { d.stringArray(forKey: "cfg.tree_expanded") ?? [] }
+        set { d.set(newValue, forKey: "cfg.tree_expanded") }
+    }
+    var playlistScrollY: Double {
+        get { d.object(forKey: "cfg.play_scroll_y") as? Double ?? 0 }
+        set { d.set(newValue, forKey: "cfg.play_scroll_y") }
+    }
+    var selectedTrackKey: String {
+        get { d.string(forKey: "cfg.selected_key") ?? "" }
+        set { d.set(newValue, forKey: "cfg.selected_key") }
+    }
 }
 
 // MARK: - MD5 helper (Last.fm api_sig)

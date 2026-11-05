@@ -648,7 +648,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         player.play(t)
         currentPlayingPath = t.dirPath
         currentPlayingKey = trackKey(t)
-        locateCurrentFolder()
         playStartTime = Date()
         playedSeconds = 0
         Config.shared.lastTrackKey = trackKey(t)

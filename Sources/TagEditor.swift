@@ -230,6 +230,7 @@ final class TagEditorWindow: NSObject, NSWindowDelegate {
     static let shared = TagEditorWindow()
     private var window: NSWindow?
     private var fields: [String: NSTextField] = [:]
+    private var pathField: NSTextField?
     private var lyricsView: NSTextView?
     private var currentTrack: Track?
 
@@ -241,6 +242,8 @@ final class TagEditorWindow: NSObject, NSWindowDelegate {
         set("artist", track.artist); set("title", track.title); set("album", track.album)
         set("year", ""); set("genre", ""); set("trackNo", "")
         set("durationMs", track.duration > 0 ? String(Int(track.duration * 1000)) : "")
+        pathField?.stringValue = track.fullPath
+        pathField?.toolTip = track.fullPath
         lyricsView?.string = embedded.isEmpty ? (cached?.synced ?? cached?.plain ?? "") : embedded
         window?.title = "Теги: \(track.artist) — \(track.title)"
         window?.makeKeyAndOrderFront(nil)
@@ -250,7 +253,7 @@ final class TagEditorWindow: NSObject, NSWindowDelegate {
     private func set(_ k: String, _ v: String) { fields[k]?.stringValue = v }
 
     private func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 550),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Редактор тегів"
         w.center()
@@ -275,6 +278,20 @@ final class TagEditorWindow: NSObject, NSWindowDelegate {
         }
         g2.column(at: 1).xPlacement = .fill
         g2.translatesAutoresizingMaskIntoConstraints = false
+        // read-only full path row (selectable so it can be copied)
+        let g1 = NSGridView(views: [])
+        g1.rowSpacing = 6
+        g1.columnSpacing = 8
+        let pathLbl = NSTextField(labelWithString: "Повний шлях"); pathLbl.font = .systemFont(ofSize: 11)
+        let pf = NSTextField(string: "")
+        pf.isEditable = false
+        pf.isSelectable = true
+        pf.font = .systemFont(ofSize: 11)
+        pf.lineBreakMode = .byTruncatingMiddle
+        pathField = pf
+        g1.addRow(with: [pathLbl, pf])
+        g1.column(at: 1).xPlacement = .fill
+        g1.translatesAutoresizingMaskIntoConstraints = false
         let lyrLabel = NSTextField(labelWithString: "Лірика (USLT)")
         lyrLabel.font = .systemFont(ofSize: 11)
         let tv = NSTextView()
@@ -293,12 +310,16 @@ final class TagEditorWindow: NSObject, NSWindowDelegate {
         status.font = .systemFont(ofSize: 11)
         statusLabel = status
         let btnRow = NSStackView(views: [save, status])
-        v.addSubview(g2); v.addSubview(lyrLabel); v.addSubview(lscroll); v.addSubview(btnRow)
+        v.addSubview(g1); v.addSubview(g2); v.addSubview(lyrLabel); v.addSubview(lscroll); v.addSubview(btnRow)
+        g1.translatesAutoresizingMaskIntoConstraints = false
         g2.translatesAutoresizingMaskIntoConstraints = false
         lyrLabel.translatesAutoresizingMaskIntoConstraints = false
         btnRow.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            g2.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
+            g1.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
+            g1.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            g1.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            g2.topAnchor.constraint(equalTo: g1.bottomAnchor, constant: 12),
             g2.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
             g2.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
             lyrLabel.topAnchor.constraint(equalTo: g2.bottomAnchor, constant: 12),

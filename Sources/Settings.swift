@@ -11,6 +11,7 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
     private var geniusField: NSTextField!
     private var lyricsCheck: NSButton!
     private var lastfmCheck: NSButton!
+    private var groupsCheck: NSButton!
     private var userField: NSTextField!
     private var passField: NSSecureTextField!
     private var statusLabel: NSTextField!
@@ -88,15 +89,22 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let btnRow = NSStackView(views: [addBtn, delBtn, rescanBtn, NSView()])
         btnRow.orientation = .horizontal
         btnRow.translatesAutoresizingMaskIntoConstraints = false
+        groupsCheck = NSButton(checkboxWithTitle: "Показувати групи за папками в плейлисті",
+                               target: self, action: #selector(saveGroups))
+        groupsCheck.state = Config.shared.showGroups ? .on : .off
         libView.addSubview(hint)
+        libView.addSubview(groupsCheck)
         libView.addSubview(scroll)
         libView.addSubview(btnRow)
         hint.translatesAutoresizingMaskIntoConstraints = false
+        groupsCheck.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             hint.topAnchor.constraint(equalTo: libView.topAnchor, constant: 12),
             hint.leadingAnchor.constraint(equalTo: libView.leadingAnchor, constant: 14),
             hint.trailingAnchor.constraint(equalTo: libView.trailingAnchor, constant: -14),
-            scroll.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 8),
+            groupsCheck.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 10),
+            groupsCheck.leadingAnchor.constraint(equalTo: libView.leadingAnchor, constant: 14),
+            scroll.topAnchor.constraint(equalTo: groupsCheck.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: libView.leadingAnchor, constant: 14),
             scroll.trailingAnchor.constraint(equalTo: libView.trailingAnchor, constant: -14),
             scroll.bottomAnchor.constraint(equalTo: btnRow.topAnchor, constant: -8),
@@ -229,6 +237,11 @@ final class SettingsWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     @objc private func rescan() {
         AppDelegate.shared?.lib.scan()
+    }
+
+    @objc private func saveGroups() {
+        Config.shared.showGroups = groupsCheck.state == .on
+        AppDelegate.shared?.applyFilter()
     }
 
     @objc private func saveLyrics() {

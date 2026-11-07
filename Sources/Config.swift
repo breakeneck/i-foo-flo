@@ -55,6 +55,12 @@ final class Config {
         get { d.bool(forKey: "cfg.rndOrder") }
         set { d.set(newValue, forKey: "cfg.rndOrder") }
     }
+    /// folder group headers in the playlist table (always shown regardless
+    /// of column sort; groups themselves are ordered by full path)
+    var showGroups: Bool {
+        get { d.object(forKey: "cfg.show_groups") as? Bool ?? true }
+        set { d.set(newValue, forKey: "cfg.show_groups") }
+    }
     /// "off" | "once" (stop after current, then clear) | "always" (stop after every track)
     var stopAfterMode: String {
         get { d.string(forKey: "cfg.stop_after_mode") ?? "off" }

@@ -319,6 +319,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         menu.delegate = self
         table.menu = menu
 
+        // context menu on the column headers: grouping toggle
+        if table.headerView == nil { table.headerView = NSTableHeaderView() }
+        let hdrMenu = NSMenu()
+        groupsHdrItem = hdrMenu.addItem(withTitle: "Групувати за папками",
+                                        action: #selector(toggleGroups), keyEquivalent: "")
+        groupsHdrItem?.target = self
+        hdrMenu.delegate = self
+        headerMenu = hdrMenu
+        table.headerView?.menu = hdrMenu
+
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -972,6 +982,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var ctxLoveItem: NSMenuItem?
     var ctxDeleteItem: NSMenuItem?
     var treeDeleteItem: NSMenuItem?
+    var headerMenu: NSMenu?
+    var groupsHdrItem: NSMenuItem?
 
     /// single-quote a path for remote shell
     func shellq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
@@ -1039,6 +1051,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === headerMenu {
+            groupsHdrItem?.state = Config.shared.showGroups ? .on : .off
+            return
+        }
         if menu === treeMenu {
             let row = outline.clickedRow
             treeMenuNode = row >= 0 ? outline.item(atRow: row) as? FolderNode : nil
@@ -1301,6 +1317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func filterChanged() { applyFilter() }
 
+    @objc func toggleGroups() {
+        Config.shared.showGroups.toggle()
+        applyFilter()
+    }
+
     func applyFilter() {
         let q = search.stringValue.lowercased()
         let ff = folderFilter
@@ -1327,12 +1348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 return sortAsc ? c == .orderedAscending : c == .orderedDescending
             }
         } else {
-            // default view: full file path — identical order to the folder tree;
-            // inside a folder, natural track-number order
+            // default view: filename order by FULL path — identical order to
+            // the folder tree; localizedStandardCompare keeps natural 01<02
             filtered.sort { a, b in
-                let c = a.dirPath.localizedCaseInsensitiveCompare(b.dirPath)
-                if c != .orderedSame { return c == .orderedAscending }
-                return a.title.localizedStandardCompare(b.title) == .orderedAscending
+                a.fullPath.localizedStandardCompare(b.fullPath) == .orderedAscending
             }
         }
         rebuildRows()
@@ -1351,17 +1370,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func rebuildRows() {
         rows = []
-        if sortKey == nil {
-            var lastFolder: String?
-            for (i, t) in filtered.enumerated() {
-                if t.folder != lastFolder {
-                    rows.append(.header(t.folder))
-                    lastFolder = t.folder
-                }
-                rows.append(.track(i))
-            }
-        } else {
-            rows = filtered.indices.map { .track($0) }
+        guard Config.shared.showGroups else {
+            rows = filtered.indices.map { RowItem.track($0) }
+            return
+        }
+        // group headers are ALWAYS present, whatever the column sort is;
+        // group order is always by full path, rows inside a group keep
+        // the active sort order
+        var groups: [String: [Int]] = [:]
+        for (i, t) in filtered.enumerated() { groups[t.dirPath, default: []].append(i) }
+        let dirs = groups.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        for dir in dirs {
+            let idxs = groups[dir]!
+            rows.append(.header(filtered[idxs[0]].folder))
+            rows.append(contentsOf: idxs.map { RowItem.track($0) })
         }
     }
 

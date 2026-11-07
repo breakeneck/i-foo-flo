@@ -116,12 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         orderPopup.selectItem(at: Config.shared.stopAfterMode == "always" ? 2
                              : (Config.shared.shuffle ? 1 : 0))
         setLyricsVisible(Config.shared.lyricsEnabled)
-        DispatchQueue.main.async {
-            let p0 = Config.shared.splitPos0
-            if p0 > 0 { self.lyricsSplit.setPosition(p0, ofDividerAt: 0) }
-            let p1 = Config.shared.splitPos1
-            if p1 > 0, self.lyricsVisible { self.lyricsSplit.setPosition(p1, ofDividerAt: 1) }
-        }
+        DispatchQueue.main.async { self.restoreSplitDividers() }
         updateSshStatus()
         isReady = true
     }
@@ -213,6 +208,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
     @objc func toggleLyrics() { setLyricsVisible(!lyricsVisible) }
 
+    /// Divider restore is timing-sensitive: setPosition silently no-ops
+    /// until the window has finished its first layout. Apply, verify, retry.
+    func restoreSplitDividers(attempt: Int = 0) {
+        let p0 = Config.shared.splitPos0
+        let p1 = Config.shared.splitPos1
+        let w = lyricsSplit.bounds.width
+        // divider 1 FIRST: moving it redistributes the left panes, so
+        // divider 0 must be pinned afterwards or it drifts
+        if p1 > 0, lyricsVisible {
+            // sanitize a collapsed/poisoned saved position: keep the pane open
+            lyricsSplit.setPosition(p1 < w - 100 ? p1 : w * 0.62, ofDividerAt: 1)
+        }
+        if p0 > 0 { lyricsSplit.setPosition(p0, ofDividerAt: 0) }
+        if lyricsVisible, w > 0, dividerPos(lyricsSplit, 1) >= w - 2, attempt < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.restoreSplitDividers(attempt: attempt + 1)
+            }
+        }
+    }
+
     var lyricsMenuItem: NSMenuItem?
 
     func setLyricsVisible(_ visible: Bool) {
@@ -223,12 +238,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         lyricsMenuItem?.state = visible ? .on : .off
         Config.shared.lyricsEnabled = visible
         if let split = lyricsSplit {
+            // NSSplitView must process the isHidden change BEFORE setPosition,
+            // otherwise setPosition is silently ignored (pane stays collapsed)
+            split.layoutSubtreeIfNeeded()
+            let w = split.bounds.width
             if visible {
-                split.setPosition(split.bounds.width * 0.62, ofDividerAt: 1)
+                // moving divider 1 redistributes the left panes — re-pin
+                // divider 0 afterwards so the tree keeps its width
+                let d0 = dividerPos(split, 0)
+                split.setPosition(w * 0.62, ofDividerAt: 1)
+                split.setPosition(d0, ofDividerAt: 0)
             } else {
-                split.setPosition(split.bounds.width - 1, ofDividerAt: 1)
+                split.setPosition(w - 1, ofDividerAt: 1)
             }
-            Config.shared.splitPos1 = dividerPos(split, 1)
+            // never persist a collapsed divider while the pane is supposed
+            // to be shown — that poisons the saved state and the next
+            // launch restores button=ON with a 0-width pane
+            let d = dividerPos(split, 1)
+            if !visible || d < w - 2 { Config.shared.splitPos1 = d }
         }
         if visible, currentTrack() != nil, currentLyrics == nil {
             if let t = currentTrack() { startLyrics(for: t) }
